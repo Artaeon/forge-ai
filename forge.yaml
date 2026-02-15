@@ -47,6 +47,19 @@ agents:
     agent_type: copilot
     command: "gh"
 
+  # Antigravity — Google Gemini API (requires GOOGLE_API_KEY)
+  antigravity-pro:
+    enabled: true
+    agent_type: antigravity
+    model: "gemini-2.5-pro"
+    max_budget_usd: 2.0
+
+  antigravity-flash:
+    enabled: true
+    agent_type: antigravity
+    model: "gemini-2.5-flash"
+    max_budget_usd: 0.50
+
 # Workspace settings
 workspace:
   default_dir: "."

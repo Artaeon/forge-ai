@@ -13,9 +13,9 @@ from pydantic import BaseModel, Field
 class AgentConfig(BaseModel):
     """Configuration for a single agent.
     
-    agent_type: The backend type (claude, gemini, copilot)
+    agent_type: The backend type (claude, gemini, copilot, antigravity)
     name: Display name for this agent variant
-    model: Specific model to use (e.g., sonnet, opus, haiku)
+    model: Specific model to use (e.g., sonnet, opus, haiku, gemini-2.5-pro)
     """
     enabled: bool = True
     agent_type: str = ""  # claude, gemini, copilot
@@ -93,6 +93,20 @@ DEFAULT_AGENTS: dict[str, dict[str, Any]] = {
         "agent_type": "copilot",
         "command": "gh",
     },
+    "antigravity-pro": {
+        "enabled": True,
+        "agent_type": "antigravity",
+        "command": "",
+        "model": "gemini-2.5-pro",
+        "max_budget_usd": 2.0,
+    },
+    "antigravity-flash": {
+        "enabled": True,
+        "agent_type": "antigravity",
+        "command": "",
+        "model": "gemini-2.5-flash",
+        "max_budget_usd": 0.50,
+    },
 }
 
 
@@ -156,11 +170,24 @@ def detect_available_agents(config: ForgeConfig) -> dict[str, bool]:
             availability[agent_name] = False
             continue
 
-        cmd = agent_config.command
-        if agent_name == "copilot":
+        agent_type = agent_config.agent_type or agent_name
+        if agent_type == "copilot":
             # Copilot uses `gh copilot`, check `gh` exists
             availability[agent_name] = shutil.which("gh") is not None
+        elif agent_type == "antigravity":
+            # Antigravity uses Google GenAI SDK, check import + API key
+            try:
+                from google import genai  # noqa: F401
+                import os
+                has_key = bool(
+                    os.environ.get("GOOGLE_API_KEY")
+                    or os.environ.get("GEMINI_API_KEY")
+                )
+                availability[agent_name] = has_key
+            except ImportError:
+                availability[agent_name] = False
         else:
-            availability[agent_name] = shutil.which(cmd) is not None
+            cmd = agent_config.command
+            availability[agent_name] = shutil.which(cmd) is not None if cmd else False
 
     return availability

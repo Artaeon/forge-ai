@@ -26,11 +26,13 @@ class ForgeEngine:
         from forge.agents.claude import ClaudeAdapter
         from forge.agents.gemini import GeminiAdapter
         from forge.agents.copilot import CopilotAdapter
+        from forge.agents.antigravity import AntigravityAdapter
 
         adapter_classes: dict[str, type] = {
             "claude": ClaudeAdapter,
             "gemini": GeminiAdapter,
             "copilot": CopilotAdapter,
+            "antigravity": AntigravityAdapter,
         }
 
         for name, agent_cfg in self.config.agents.items():
@@ -53,6 +55,7 @@ class ForgeEngine:
         from forge.agents.claude import ClaudeAdapter
         from forge.agents.gemini import GeminiAdapter
         from forge.agents.copilot import CopilotAdapter
+        from forge.agents.antigravity import AntigravityAdapter
 
         if cls is ClaudeAdapter:
             return ClaudeAdapter(
@@ -68,6 +71,11 @@ class ForgeEngine:
             )
         elif cls is CopilotAdapter:
             return CopilotAdapter(extra_args=cfg.extra_args)
+        elif cls is AntigravityAdapter:
+            return AntigravityAdapter(
+                model=cfg.model or "gemini-2.5-pro",
+                extra_args=cfg.extra_args,
+            )
         else:
             raise ValueError(f"Unknown adapter class: {cls}")
 
