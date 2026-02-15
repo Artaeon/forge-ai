@@ -1,0 +1,27 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "forge-ai"
+version = "0.2.0"
+description = "AI Coding Agent Orchestrator — unifies Claude Code, Gemini CLI, and GitHub Copilot into a single console for autonomous builds"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [
+    { name = "Raphael Lugmayr" },
+]
+dependencies = [
+    "click>=8.1",
+    "rich>=13.0",
+    "pyyaml>=6.0",
+    "pydantic>=2.0",
+    "pydantic-settings>=2.0",
+]
+
+[project.scripts]
+forge = "forge.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["forge"]
