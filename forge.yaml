@@ -1,0 +1,69 @@
+# Forge — AI Orchestrator Configuration
+# ======================================
+
+# Global settings
+global:
+  # Default timeout per agent execution (seconds)
+  timeout: 120
+  # Max parallel agents
+  max_parallel: 5
+  # Auto-commit successful build steps
+  auto_commit: false
+  # Max iterations for autonomous build loop
+  max_build_iterations: 10
+
+# Agent configurations — multiple model variants supported
+agents:
+  # Claude has 3 model tiers
+  claude-sonnet:
+    enabled: true
+    agent_type: claude
+    command: "claude"
+    model: "sonnet"
+    max_budget_usd: 1.0
+
+  claude-opus:
+    enabled: true
+    agent_type: claude
+    command: "claude"
+    model: "opus"
+    max_budget_usd: 5.0
+
+  claude-haiku:
+    enabled: true
+    agent_type: claude
+    command: "claude"
+    model: "haiku"
+    max_budget_usd: 0.25
+
+  gemini:
+    enabled: true
+    agent_type: gemini
+    command: "gemini"
+    fallback_to_api: true
+
+  copilot:
+    enabled: true
+    agent_type: copilot
+    command: "gh"
+
+# Workspace settings
+workspace:
+  default_dir: "."
+  create_git: true
+  # Root directory for new projects (forge build --new project-name)
+  projects_root: "~/Projects"
+
+# Build pipeline settings
+build:
+  # Commands to verify the build
+  test_commands:
+    - "python -m pytest"
+  # Commands to check code quality
+  lint_commands:
+    - "python -m ruff check ."
+  # File patterns to watch in autonomous mode
+  watch_patterns:
+    - "**/*.py"
+    - "**/*.js"
+    - "**/*.ts"
