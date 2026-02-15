@@ -28,7 +28,7 @@ from rich.markdown import Markdown
 
 from forge.agents.base import AgentResult, AgentStatus, TaskContext
 from forge.engine import ForgeEngine
-from forge.build.context import gather_context
+from forge.build.compact import gather_compact, summarize_round, build_history_summary
 
 console = Console()
 
@@ -171,71 +171,72 @@ class DuoBuildPipeline:
     async def _plan(self, objective: str) -> DuoRound:
         """Planner creates the project architecture and README."""
         prompt = (
-            f"You are the ARCHITECT for a new software project.\n\n"
+            f"ROLE: Project architect\n"
             f"OBJECTIVE: {objective}\n\n"
-            f"Create a comprehensive project plan. Output the following:\n\n"
-            f"1. A README.md with project description, features, and usage\n"
-            f"2. A list of ALL files that need to be created with descriptions\n"
-            f"3. The technology stack and key dependencies\n"
-            f"4. Architecture decisions and patterns to use\n\n"
-            f"Be specific about file paths and what each file should contain.\n"
-            f"This plan will be given to another AI agent to implement."
+            f"Create a concise project plan:\n"
+            f"1. Tech stack and dependencies\n"
+            f"2. File list with one-line descriptions\n"
+            f"3. Key architecture decisions\n\n"
+            f"Be specific about file paths. Keep it concise — this goes to a coder agent."
         )
         return await self._dispatch(PHASE_PLAN, self.planner, prompt)
 
     async def _code(self, objective: str, plan: str) -> DuoRound:
         """Coder implements the full project from the plan."""
+        # Summarize the plan to avoid passing 5K+ raw tokens
+        compact_plan = summarize_round(self.planner, PHASE_PLAN, plan, max_chars=2000)
         prompt = (
-            f"You are an expert SOFTWARE ENGINEER. Implement the following project.\n\n"
+            f"ROLE: Software engineer — implement this project.\n"
             f"OBJECTIVE: {objective}\n\n"
-            f"PROJECT PLAN (created by the architect):\n"
-            f"{'─' * 60}\n{plan}\n{'─' * 60}\n\n"
-            f"Working directory: {self.working_dir}\n\n"
-            f"INSTRUCTIONS:\n"
-            f"- Create ALL files specified in the plan\n"
-            f"- Write complete, production-quality code (no placeholders)\n"
-            f"- Include proper error handling, typing, and docstrings\n"
-            f"- Create tests if specified in the plan\n"
-            f"- Follow best practices for the chosen language/framework\n"
+            f"PLAN:\n{compact_plan}\n\n"
+            f"Dir: {self.working_dir}\n\n"
+            f"Create ALL files. Write complete production code, no placeholders."
         )
         return await self._dispatch_agentic(PHASE_CODE, self.coder, prompt)
 
     async def _review(self, objective: str, iteration: int) -> DuoRound:
         """Reviewer examines the code and produces feedback."""
-        context = gather_context(self.working_dir)
+        ctx = gather_compact(self.working_dir)
+
+        # Build compact history of previous rounds
+        history = build_history_summary(
+            [{"agent_name": r.agent_name, "phase": r.phase, "output": r.output}
+             for r in self.rounds],
+            max_total=800,
+        )
+
         prompt = (
-            f"You are a SENIOR CODE REVIEWER. Review this project thoroughly.\n\n"
-            f"ORIGINAL OBJECTIVE: {objective}\n\n"
-            f"CURRENT PROJECT STATE:\n"
-            f"{context.to_prompt_section()}\n\n"
-            f"This is review round {iteration}/{self.max_rounds}.\n\n"
-            f"REVIEW CHECKLIST:\n"
-            f"1. Does the code fulfill the objective?\n"
-            f"2. Are there bugs, errors, or missing features?\n"
-            f"3. Is error handling adequate?\n"
-            f"4. Are there tests? Do they cover key functionality?\n"
-            f"5. Is the code well-structured and maintainable?\n"
-            f"6. Is there a proper README?\n\n"
-            f"If the project is COMPLETE and PRODUCTION-READY, start your response "
-            f"with the word APPROVED.\n\n"
-            f"If NOT ready, list the specific issues that need fixing, ordered by "
-            f"priority. Be concrete — reference specific files and line numbers."
+            f"ROLE: Senior code reviewer\n"
+            f"OBJECTIVE: {objective}\n"
+            f"Review {iteration}/{self.max_rounds}\n\n"
+            f"PROJECT: {ctx.to_prompt()}\n\n"
+        )
+
+        if history:
+            prompt += f"HISTORY:\n{history}\n\n"
+
+        prompt += (
+            f"Review for: bugs, missing features, error handling, tests, structure.\n"
+            f"If COMPLETE and PRODUCTION-READY, start with APPROVED.\n"
+            f"If NOT, list issues concisely (max 5 bullet points)."
         )
         return await self._dispatch(PHASE_REVIEW, self.planner, prompt)
 
     async def _fix(self, objective: str, review_feedback: str, iteration: int) -> DuoRound:
         """Coder fixes issues identified in the review."""
-        context = gather_context(self.working_dir)
+        # Extract only the actionable issues from review
+        compact_feedback = summarize_round(
+            self.planner, PHASE_REVIEW, review_feedback, max_chars=1000
+        )
+        ctx = gather_compact(self.working_dir)
+
         prompt = (
-            f"You are a SOFTWARE ENGINEER fixing issues from a code review.\n\n"
-            f"ORIGINAL OBJECTIVE: {objective}\n\n"
-            f"REVIEW FEEDBACK (fix ALL of these):\n"
-            f"{'─' * 60}\n{review_feedback}\n{'─' * 60}\n\n"
-            f"CURRENT PROJECT STATE:\n"
-            f"{context.to_prompt_section()}\n\n"
-            f"Working directory: {self.working_dir}\n\n"
-            f"Fix iteration {iteration}: Address every issue raised in the review.\n"
-            f"Make the changes directly to the files.\n"
+            f"ROLE: Software engineer — fix review issues.\n"
+            f"OBJECTIVE: {objective}\n\n"
+            f"ISSUES TO FIX:\n{compact_feedback}\n\n"
+            f"PROJECT: {ctx.to_prompt()}\n\n"
+            f"Dir: {self.working_dir}\n"
+            f"Fix iteration {iteration}. Address every issue. Make changes directly."
         )
         return await self._dispatch_agentic(PHASE_FIX, self.coder, prompt)
 
