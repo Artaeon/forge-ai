@@ -43,8 +43,8 @@ class GeminiAdapter(BaseAdapter):
         """Build the gemini CLI command.
 
         Uses `-p` for headless (non-interactive) mode.
-        agentic=False: standard prompt, text output
-        agentic=True:  prompt with file-writing instructions
+        agentic=False: standard prompt, text output (plan mode)
+        agentic=True:  yolo mode — auto-approves file writes
         """
         cmd = ["gemini"]
 
@@ -52,9 +52,13 @@ class GeminiAdapter(BaseAdapter):
         if self.model:
             cmd.extend(["-m", self.model])
 
-        # Sandbox mode for agentic (allows file operations)
         if agentic:
-            cmd.extend(["-s", "true"])
+            # YOLO mode: auto-approve all tool actions (file writes, edits)
+            # Sandbox OFF: allow real file system operations
+            cmd.extend(["--yolo", "--sandbox", "false"])
+        else:
+            # Read-only / plan mode for non-agentic calls
+            cmd.extend(["--sandbox", "true"])
 
         cmd.extend(self.extra_args)
 
@@ -64,26 +68,23 @@ class GeminiAdapter(BaseAdapter):
         return cmd
 
     async def execute(self, ctx: TaskContext) -> AgentResult:
-        """Execute in standard mode (text Q&A)."""
+        """Execute in standard mode (text Q&A, read-only)."""
         return await self._run(ctx, agentic=False)
 
     async def execute_agentic(self, ctx: TaskContext) -> AgentResult:
-        """Execute in agentic mode — Gemini can create/edit files.
+        """Execute in agentic mode — Gemini uses native tools to write files.
 
-        Enhances the prompt with file-writing instructions and parses
-        the output to write files to disk.
+        Uses --yolo flag so Gemini auto-approves file operations.
+        Falls back to parsing text output if native tool fails.
         """
-        # Enhance prompt for file generation
+        # Let Gemini use its native file tools directly
+        # No need to wrap prompt with === FILE: === instructions
         agentic_prompt = (
-            "You are an autonomous coding agent working in the directory: "
-            f"{ctx.working_dir}\n\n"
-            "Your task is to create or modify files to accomplish the objective below.\n\n"
-            "For EACH file you create or modify, output it in this exact format:\n\n"
-            "=== FILE: <relative/path/to/file> ===\n"
-            "<complete file contents>\n"
-            "=== END FILE ===\n\n"
-            "Output ALL files needed with complete contents.\n\n"
-            f"OBJECTIVE: {ctx.prompt}"
+            f"You are an autonomous coding agent. "
+            f"Working directory: {ctx.working_dir}\n\n"
+            f"Create or modify all files needed to accomplish the task. "
+            f"Use your file writing tools to create the files directly.\n\n"
+            f"TASK: {ctx.prompt}"
         )
 
         modified_ctx = TaskContext(
@@ -98,6 +99,8 @@ class GeminiAdapter(BaseAdapter):
 
         result = await self._run(modified_ctx, agentic=True)
 
+        # Fallback: if Gemini output contains file blocks but didn't write them,
+        # parse and write them ourselves
         if result.is_success and result.output:
             files_written = self._write_files_from_output(result.output, ctx.working_dir)
             if files_written:

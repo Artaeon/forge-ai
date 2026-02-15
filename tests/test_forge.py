@@ -100,11 +100,13 @@ class TestGeminiAdapter:
         assert "-m" in cmd
         assert "gemini-2.5-pro" in cmd
 
-    def test_build_command_agentic_sandbox(self):
+    def test_build_command_agentic_yolo(self):
         adapter = GeminiAdapter()
         ctx = TaskContext(working_dir=".", prompt="test")
         cmd = adapter._build_command(ctx, agentic=True)
-        assert "-s" in cmd
+        assert "--yolo" in cmd
+        assert "--sandbox" in cmd
+        assert "false" in cmd
 
     def test_unavailable_returns_status(self):
         adapter = GeminiAdapter()
