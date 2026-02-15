@@ -66,21 +66,18 @@ DEFAULT_AGENTS: dict[str, dict[str, Any]] = {
         "agent_type": "claude",
         "command": "claude",
         "model": "sonnet",
-        "max_budget_usd": 1.0,
     },
     "claude-opus": {
         "enabled": True,
         "agent_type": "claude",
         "command": "claude",
         "model": "opus",
-        "max_budget_usd": 5.0,
     },
     "claude-haiku": {
         "enabled": True,
         "agent_type": "claude",
         "command": "claude",
         "model": "haiku",
-        "max_budget_usd": 0.25,
     },
     "gemini": {
         "enabled": True,
@@ -98,14 +95,14 @@ DEFAULT_AGENTS: dict[str, dict[str, Any]] = {
         "agent_type": "antigravity",
         "command": "",
         "model": "gemini-2.5-pro",
-        "max_budget_usd": 2.0,
+        "max_budget_usd": 10.0,
     },
     "antigravity-flash": {
         "enabled": True,
         "agent_type": "antigravity",
         "command": "",
         "model": "gemini-2.5-flash",
-        "max_budget_usd": 0.50,
+        "max_budget_usd": 5.0,
     },
 }
 
