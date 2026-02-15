@@ -200,12 +200,42 @@ class GeminiAdapter(BaseAdapter):
         await proc.wait()
 
     def _write_files_from_output(self, output: str, working_dir: str) -> list[str]:
-        """Parse file blocks from agent output and write them to disk."""
+        """Parse file blocks from agent output and write them to disk.
+
+        Handles noisy output with error messages mixed in.
+        Supports multiple format patterns that Gemini may output.
+        """
         from pathlib import Path
 
-        pattern = r"=== FILE: (.+?) ===\n(.*?)(?==== END FILE ===|=== FILE:|\Z)"
-        matches = re.findall(pattern, output, re.DOTALL)
+        # Strip noise: remove error lines and tool messages
+        clean_lines = []
+        for line in output.split("\n"):
+            if any(skip in line for skip in [
+                "Error executing tool",
+                "Tool execution denied",
+                "Hook registry initialized",
+                "Loaded cached credentials",
+                "Did you mean one of:",
+            ]):
+                continue
+            clean_lines.append(line)
+        clean_output = "\n".join(clean_lines)
+
         written = []
+
+        # Pattern 1: === FILE: path === ... === END FILE ===
+        pattern1 = r"=== FILE:\s*(.+?)\s*===\n(.*?)(?=\n=== END FILE ===|\n=== FILE:|\Z)"
+        matches = re.findall(pattern1, clean_output, re.DOTALL)
+
+        # Pattern 2: ```path\n...\n``` (fenced code blocks with filenames)
+        if not matches:
+            pattern2 = r"```(\S+\.\w+)\n(.*?)```"
+            matches = re.findall(pattern2, clean_output, re.DOTALL)
+
+        # Pattern 3: --- path --- ... --- END ---
+        if not matches:
+            pattern3 = r"---\s*(.+?\.\w+)\s*---\n(.*?)(?=\n---\s|\Z)"
+            matches = re.findall(pattern3, clean_output, re.DOTALL)
 
         for filepath, content in matches:
             filepath = filepath.strip()
@@ -213,6 +243,10 @@ class GeminiAdapter(BaseAdapter):
 
             # Security: prevent path traversal
             if ".." in filepath or filepath.startswith("/"):
+                continue
+
+            # Skip non-file paths (e.g., "bash", "python", "json")
+            if "/" not in filepath and "." not in filepath:
                 continue
 
             full_path = Path(working_dir) / filepath

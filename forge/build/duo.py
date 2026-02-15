@@ -262,7 +262,11 @@ class DuoBuildPipeline:
         )
 
     async def _dispatch_agentic(self, phase: str, agent: str, prompt: str) -> DuoRound:
-        """Dispatch to an agent in agentic mode (can write files)."""
+        """Dispatch to an agent in agentic mode (can write files).
+
+        If the agent can't natively write files (like Gemini CLI),
+        we parse its text output for file blocks and write them ourselves.
+        """
         ctx = TaskContext(
             working_dir=self.working_dir,
             prompt=prompt,
@@ -280,10 +284,30 @@ class DuoBuildPipeline:
                 success=False,
             )
 
+        # Count files before execution
+        files_before = set(self._list_project_files())
+
         if hasattr(adapter, "execute_agentic"):
             result = await adapter.execute_agentic(ctx)
         else:
             result = await adapter.execute(ctx)
+
+        # Check if any files were actually created
+        files_after = set(self._list_project_files())
+        new_files = files_after - files_before
+
+        # Fallback: if no files were created on disk, parse output for file blocks
+        if result.is_success and not new_files and result.output:
+            extracted = self._extract_files_from_output(result.output)
+            if extracted:
+                console.print(
+                    f"[dim]  📝 Extracted {len(extracted)} file(s) from output[/]"
+                )
+                result.output = (
+                    f"Extracted {len(extracted)} file(s): "
+                    + ", ".join(extracted)
+                    + "\n\n" + result.output
+                )
 
         return DuoRound(
             round_number=len(self.rounds) + 1,
@@ -295,6 +319,61 @@ class DuoBuildPipeline:
             duration_ms=result.duration_ms,
             cost_usd=result.cost_usd,
         )
+
+    def _extract_files_from_output(self, output: str) -> list[str]:
+        """Parse file blocks from agent text output and write to disk.
+
+        Fallback for agents that can't write files natively (e.g. Gemini CLI).
+        Supports multiple output formats.
+        """
+        import re
+
+        # Strip noise
+        clean_lines = []
+        for line in output.split("\n"):
+            if any(skip in line for skip in [
+                "Error executing tool",
+                "Tool execution denied",
+                "Hook registry initialized",
+                "Loaded cached credentials",
+                "Did you mean one of:",
+            ]):
+                continue
+            clean_lines.append(line)
+        clean = "\n".join(clean_lines)
+
+        written = []
+
+        # Pattern 1: === FILE: path === ... === END FILE ===
+        p1 = r"=== FILE:\s*(.+?)\s*===\n(.*?)(?=\n=== END FILE ===|\n=== FILE:|\Z)"
+        matches = re.findall(p1, clean, re.DOTALL)
+
+        # Pattern 2: ```path\n...\n```
+        if not matches:
+            p2 = r"```(\S+/\S+\.\w+)\n(.*?)```"
+            matches = re.findall(p2, clean, re.DOTALL)
+
+        # Pattern 3: --- path ---
+        if not matches:
+            p3 = r"---\s*(\S+/\S+\.\w+)\s*---\n(.*?)(?=\n---\s|\Z)"
+            matches = re.findall(p3, clean, re.DOTALL)
+
+        for filepath, content in matches:
+            filepath = filepath.strip()
+            content = content.rstrip("\n") + "\n"
+
+            # Security
+            if ".." in filepath or filepath.startswith("/"):
+                continue
+            if "/" not in filepath and "." not in filepath:
+                continue
+
+            full_path = Path(self.working_dir) / filepath
+            full_path.parent.mkdir(parents=True, exist_ok=True)
+            full_path.write_text(content)
+            written.append(filepath)
+
+        return written
 
     # ─── Approval detection ──────────────────────────────────
 
