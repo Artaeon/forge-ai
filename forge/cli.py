@@ -291,9 +291,9 @@ def build(
     if total_cost > 0:
         console.print(f"[dim]💰 Total cost: ${total_cost:.4f}[/]")
     if steps and steps[-1].build_success:
-        console.print(f"[bold green]✅ Build completed successfully![/]")
+        console.print(f"[bold green]Build completed successfully.[/]")
     else:
-        console.print(f"[bold yellow]⚠ Build did not fully complete.[/]")
+        console.print(f"[bold yellow]Build did not fully complete.[/]")
 
 
 # ─── AGENTS ───────────────────────────────────────────────────
@@ -333,6 +333,61 @@ def agents(config_path: str | None) -> None:
     console.print(modes_table)
 
     console.print("\n[dim]Usage: forge run --mode chain -a claude-sonnet -a claude-opus \"your prompt\"[/]")
+
+
+# ─── INIT ─────────────────────────────────────────────────────
+
+
+@main.command(name="init")
+@click.argument("template")
+@click.option("--dir", "-d", "target_dir", default=".", help="Target directory")
+@click.option("--list", "-l", "list_only", is_flag=True, help="List available templates")
+def init_project(template: str, target_dir: str, list_only: bool) -> None:
+    """Initialize a project from a built-in template.
+
+    \b
+    Available templates:
+      flask-api    Flask REST API with config, routes, and tests
+      fastapi      FastAPI application with async routes and tests
+      cli-tool     Python CLI application with Click
+      nextjs       Next.js application (manual setup required)
+
+    \b
+    Examples:
+      forge init flask-api
+      forge init fastapi --dir ./my-app
+    """
+    from forge.build.templates import list_templates, scaffold_template
+
+    if list_only:
+        for name, desc in list_templates():
+            console.print(f"  [bold]{name:16}[/] {desc}")
+        return
+
+    print_header()
+
+    target = os.path.abspath(target_dir)
+    os.makedirs(target, exist_ok=True)
+
+    try:
+        created = scaffold_template(template, target)
+    except ValueError as e:
+        console.print(f"[red]{e}[/]")
+        sys.exit(1)
+
+    console.print(f"[green]Initialized '{template}' template in {target}[/]")
+    for f in created:
+        console.print(f"[dim]  + {f}[/]")
+
+    # Auto-init git
+    if not os.path.exists(os.path.join(target, ".git")):
+        import subprocess
+        subprocess.run(["git", "init"], cwd=target, capture_output=True)
+        console.print(f"[dim]  Initialized git repository[/]")
+
+    console.print(
+        f"\n[dim]Next: cd {target_dir} && forge build \"your objective\"[/]"
+    )
 
 
 # ─── Async Helpers ────────────────────────────────────────────
