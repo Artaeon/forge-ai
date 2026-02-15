@@ -34,6 +34,9 @@ AGENT_COLORS: dict[str, str] = {
     "claude": "bright_magenta",
     "gemini": "bright_cyan",
     "copilot": "bright_green",
+    "antigravity-pro": "bright_blue",
+    "antigravity-flash": "dodger_blue2",
+    "antigravity": "bright_blue",
 }
 
 
@@ -42,7 +45,7 @@ def _get_color(name: str) -> str:
     if name in AGENT_COLORS:
         return AGENT_COLORS[name]
     # Check prefix
-    for prefix in ("claude", "gemini", "copilot"):
+    for prefix in ("claude", "gemini", "copilot", "antigravity"):
         if name.startswith(prefix):
             return AGENT_COLORS[prefix]
     return "white"
@@ -169,8 +172,8 @@ def print_header() -> None:
   ██║     ╚██████╔╝██║  ██║╚██████╔╝███████╗
   ╚═╝      ╚═════╝ ╚═╝  ╚═╝ ╚═════╝ ╚══════╝
 [/]
-[dim]  AI Coding Agent Orchestrator v0.2.0[/]
-[dim]  Claude Code • Gemini • Copilot[/]
+[dim]  AI Coding Agent Orchestrator v0.3.0[/]
+[dim]  Claude Code • Gemini • Antigravity • Copilot[/]
 """
     console.print(banner)
 
