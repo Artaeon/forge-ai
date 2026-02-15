@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "forge-ai"
-version = "0.2.0"
+version = "0.3.0"
 description = "AI Coding Agent Orchestrator — unifies Claude Code, Gemini CLI, and GitHub Copilot into a single console for autonomous builds"
 readme = "README.md"
 requires-python = ">=3.11"
