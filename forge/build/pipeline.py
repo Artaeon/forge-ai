@@ -64,7 +64,14 @@ class BuildPipeline:
     ROLE_REVIEWER = "reviewer"
 
     # Model tiers for escalation (weakest to strongest)
-    ESCALATION_TIERS = ["claude-haiku", "claude-sonnet", "claude-opus"]
+    ESCALATION_TIERS = [
+        "claude-haiku",
+        "antigravity-flash",
+        "gemini",
+        "claude-sonnet",
+        "antigravity-pro",
+        "claude-opus",
+    ]
 
     def __init__(
         self,
