@@ -390,6 +390,101 @@ def init_project(template: str, target_dir: str, list_only: bool) -> None:
     )
 
 
+# ─── DUO ──────────────────────────────────────────────────────
+
+
+@main.command()
+@click.argument("objective")
+@click.option("--planner", "-p", "planner_agent", default="gemini",
+              help="Agent for planning and reviewing (default: gemini)")
+@click.option("--coder", "-c", "coder_agent", default="claude-sonnet",
+              help="Agent for coding and fixing (default: claude-sonnet)")
+@click.option("--rounds", "-r", "max_rounds", default=5, type=int,
+              help="Max review/fix rounds (default: 5)")
+@click.option("--dir", "-d", "work_dir", default=".", help="Working directory")
+@click.option("--new", "new_project", default=None, help="Create new project directory")
+@click.option("--no-commit", is_flag=True, help="Skip auto-commit")
+@click.option("--timeout", "-t", default=300, type=int, help="Timeout per agent call (seconds)")
+def duo(
+    objective: str,
+    planner_agent: str,
+    coder_agent: str,
+    max_rounds: int,
+    work_dir: str,
+    new_project: str | None,
+    no_commit: bool,
+    timeout: int,
+) -> None:
+    """Collaborative build — two agents iterate toward v1.
+
+    One agent PLANS and REVIEWS, the other CODES and FIXES.
+    They iterate until the reviewer approves or max rounds are reached.
+
+    \b
+    Flow:
+      1. Planner creates README + architecture
+      2. Coder implements all files
+      3. Planner reviews the code
+      4. Coder fixes issues
+      5. Repeat 3-4 until approved
+
+    \b
+    Examples:
+      forge duo "Build a REST API with user auth"
+      forge duo "Create a CLI calculator" --planner gemini --coder claude-sonnet
+      forge duo "Todo app with tests" --new my-todo --rounds 3
+    """
+    print_header()
+
+    from forge.build.duo import DuoBuildPipeline
+
+    cfg = load_config()
+    engine = ForgeEngine(cfg)
+
+    # Resolve working directory
+    if new_project:
+        projects_root = cfg.workspace.projects_root or "."
+        wd = os.path.join(os.path.expanduser(projects_root), new_project)
+        os.makedirs(wd, exist_ok=True)
+        console.print(f"[dim]📂 Created project: {wd}[/]\n")
+    else:
+        wd = os.path.abspath(work_dir)
+
+    # Validate agents
+    available = engine.get_available_agents()
+    for agent_name, label in [(planner_agent, "planner"), (coder_agent, "coder")]:
+        if agent_name not in available:
+            console.print(f"[red]Agent '{agent_name}' not configured[/]")
+            sys.exit(1)
+        if not available[agent_name]:
+            console.print(f"[yellow]Warning: {label} '{agent_name}' is not available[/]")
+
+    console.print(
+        f"[bold]🏗️  Collaborative Build[/]\n"
+        f"[dim]  Planner/Reviewer: [bold bright_cyan]{planner_agent}[/][/]\n"
+        f"[dim]  Coder:            [bold bright_magenta]{coder_agent}[/][/]\n"
+        f"[dim]  Max rounds:       {max_rounds}[/]\n"
+        f"[dim]  Working dir:      {wd}[/]\n"
+    )
+
+    pipeline = DuoBuildPipeline(
+        engine=engine,
+        working_dir=wd,
+        planner_agent=planner_agent,
+        coder_agent=coder_agent,
+        max_rounds=max_rounds,
+        auto_commit=not no_commit,
+        timeout=timeout,
+    )
+
+    result = asyncio.run(pipeline.run(objective))
+
+    if result.approved:
+        console.print("\n[bold green]Build complete. Project ready.[/]")
+    else:
+        console.print("\n[bold yellow]Build finished. Review manually.[/]")
+
+
 # ─── Async Helpers ────────────────────────────────────────────
 
 
