@@ -47,11 +47,12 @@ pip install -e .
 
 ### Prerequisites
 
-At least one of the following AI CLIs must be installed and authenticated:
+At least one of the following AI CLIs or API keys must be configured:
 
-| Agent | Install Command | Documentation |
+| Agent | Install / Setup | Documentation |
 |-------|----------------|---------------|
 | Claude Code | `npm install -g @anthropic-ai/claude-code` | [claude.ai/code](https://claude.ai/code) |
+| Antigravity | `pip install google-genai` + set `GOOGLE_API_KEY` | [ai.google.dev](https://ai.google.dev/) |
 | Gemini CLI | `npm install -g @google/gemini-cli` | [github.com/google/gemini-cli](https://github.com/google/gemini-cli) |
 | GitHub Copilot | `gh extension install github/gh-copilot` | [docs.github.com/copilot](https://docs.github.com/en/copilot) |
 
@@ -68,7 +69,8 @@ forge config
 ```bash
 forge run "Write a Python fibonacci function"
 forge run -a claude-opus "Design a database schema for a blog"
-forge run -a claude-haiku "Explain what asyncio does in three sentences"
+forge run -a antigravity-pro "Implement a binary search tree"
+forge run -a antigravity-flash "Explain what asyncio does in three sentences"
 ```
 
 ### Multi-Agent Comparison
@@ -233,6 +235,7 @@ forge/
   agents/
     base.py             Agent protocol and data models
     claude.py           Claude Code adapter (print + agentic modes)
+    antigravity.py      Antigravity adapter (Google GenAI SDK)
     gemini.py           Gemini CLI adapter
     copilot.py          GitHub Copilot adapter
   build/
