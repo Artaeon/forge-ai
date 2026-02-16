@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import importlib
 import importlib.util
+import logging
 import sys
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -17,6 +18,7 @@ from typing import Any
 from rich.console import Console
 
 console = Console()
+logger = logging.getLogger(__name__)
 
 
 # ─── Plugin Interface ─────────────────────────────────────────
@@ -157,14 +159,16 @@ class PluginRegistry:
         for p in self.plugins:
             try:
                 p.on_pipeline_start(objective, working_dir)
-            except Exception as e:
+            except (TypeError, AttributeError, RuntimeError) as e:
+                logger.warning("Plugin %s error on start: %s", p.name, e)
                 console.print(f"[red]Plugin {p.name} error on start: {e}[/]")
 
     def on_end(self, result: Any) -> None:
         for p in self.plugins:
             try:
                 p.on_pipeline_end(result)
-            except Exception as e:
+            except (TypeError, AttributeError, RuntimeError) as e:
+                logger.warning("Plugin %s error on end: %s", p.name, e)
                 console.print(f"[red]Plugin {p.name} error on end: {e}[/]")
 
 
@@ -226,7 +230,8 @@ def load_plugins_from_dir(
                         ):
                             registry.register(obj())
                             break
-        except Exception as e:
+        except (ImportError, AttributeError, TypeError, OSError) as e:
+            logger.warning("Failed to load plugin %s: %s", py_file.name, e)
             console.print(f"[red]Failed to load plugin {py_file.name}: {e}[/]")
 
     return registry
@@ -274,7 +279,7 @@ class SecurityCheckPlugin(ForgePlugin):
                             (f"⚠️  Possible hardcoded secret in {rel}", -3)
                         )
                         break
-            except Exception:
+            except (OSError, PermissionError):
                 continue
 
         if not issues:

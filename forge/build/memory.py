@@ -217,7 +217,7 @@ class PersistentMemory:
             data = json.loads(self._mem_file.read_text())
             for item in data.get("learnings", []):
                 self._entries.append(LearningEntry(**item))
-        except Exception:
+        except (json.JSONDecodeError, OSError, KeyError, TypeError):
             pass
 
     def save(self) -> None:

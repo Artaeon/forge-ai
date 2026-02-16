@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import logging
 from dataclasses import dataclass, field
 
 
@@ -96,7 +97,7 @@ def gather_compact(working_dir: str) -> CompactContext:
                         if fw in content:
                             ctx.framework = fw
                             break
-                except Exception:
+                except (OSError, PermissionError):
                     pass
                 break
     elif ctx.language in ("javascript", "typescript"):
@@ -108,7 +109,7 @@ def gather_compact(working_dir: str) -> CompactContext:
                     if fw in content:
                         ctx.framework = fw
                         break
-            except Exception:
+            except (OSError, PermissionError):
                 pass
 
     return ctx
@@ -310,7 +311,7 @@ def select_context_window(
             continue
         try:
             content = p.read_text(errors="replace")
-        except Exception:
+        except (OSError, PermissionError):
             continue
 
         chunks = chunk_file(rel, content)

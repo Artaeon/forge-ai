@@ -7,6 +7,7 @@ file tree, git status, language/framework detection, and key file contents.
 from __future__ import annotations
 
 import os
+import logging
 import subprocess
 from pathlib import Path
 from dataclasses import dataclass, field
@@ -120,7 +121,7 @@ def _run_git(wd: Path, cmd: list[str]) -> str:
             cmd, cwd=str(wd), capture_output=True, text=True, timeout=10,
         )
         return result.stdout.strip()
-    except Exception:
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
         return ""
 
 
@@ -233,7 +234,7 @@ def _read_dep_file(wd: Path, language: str) -> str:
         if fpath.exists():
             try:
                 return fpath.read_text(errors="replace")[:5000]
-            except Exception:
+            except (OSError, PermissionError):
                 pass
     return ""
 
@@ -248,7 +249,7 @@ def _read_key_files(wd: Path, project_info: ProjectInfo) -> dict[str, str]:
         if fpath.exists():
             try:
                 key_files[cf] = fpath.read_text(errors="replace")[:3000]
-            except Exception:
+            except (OSError, PermissionError):
                 pass
 
     # Include entry point
@@ -257,7 +258,7 @@ def _read_key_files(wd: Path, project_info: ProjectInfo) -> dict[str, str]:
         if fpath.exists():
             try:
                 key_files[project_info.entry_point] = fpath.read_text(errors="replace")[:3000]
-            except Exception:
+            except (OSError, PermissionError):
                 pass
 
     # Include README if present
@@ -266,7 +267,7 @@ def _read_key_files(wd: Path, project_info: ProjectInfo) -> dict[str, str]:
         if fpath.exists():
             try:
                 key_files[readme] = fpath.read_text(errors="replace")[:2000]
-            except Exception:
+            except (OSError, PermissionError):
                 pass
             break
 

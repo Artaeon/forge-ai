@@ -116,7 +116,7 @@ def score_project(working_dir: str) -> QualityScore:
         try:
             lines = f.read_text(errors="replace").count("\n")
             total_lines += lines
-        except Exception:
+        except (OSError, PermissionError):
             pass
 
     if total_lines > 200:
@@ -136,7 +136,7 @@ def score_project(working_dir: str) -> QualityScore:
             content = f.read_text(errors="replace").lower()
             if "todo" in content or "pass  # placeholder" in content:
                 placeholder_count += 1
-        except Exception:
+        except (OSError, PermissionError):
             pass
 
     if placeholder_count == 0:
@@ -164,7 +164,7 @@ def score_project(working_dir: str) -> QualityScore:
             if "assert" in content or "expect(" in content or "should" in content:
                 has_assertions = True
                 break
-        except Exception:
+        except (OSError, PermissionError):
             pass
     if has_assertions:
         tests += 10
@@ -220,7 +220,7 @@ def score_project(working_dir: str) -> QualityScore:
             if '"""' in content or "'''" in content or "/**" in content:
                 has_docstrings = True
                 break
-        except Exception:
+        except (OSError, PermissionError):
             pass
 
     if has_docstrings:

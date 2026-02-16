@@ -6,9 +6,12 @@ identifies the missing package, and attempts to install it.
 
 from __future__ import annotations
 
+import logging
 import re
 import subprocess
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 # Map of common module names to pip package names
@@ -104,8 +107,8 @@ def resolve_missing_deps(
                 )
                 if result.returncode == 0:
                     installed.append(package)
-            except Exception:
-                pass
+            except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
+                logger.debug("Dependency install failed for %s: %s", package, e)
 
         elif is_node:
             try:
@@ -115,7 +118,7 @@ def resolve_missing_deps(
                 )
                 if result.returncode == 0:
                     installed.append(package)
-            except Exception:
-                pass
+            except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
+                logger.debug("Dependency install failed for %s: %s", package, e)
 
     return installed

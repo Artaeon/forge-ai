@@ -58,7 +58,7 @@ def _load_runs(path: Path) -> list[dict]:
         return []
     try:
         return json.loads(path.read_text())
-    except Exception:
+    except (json.JSONDecodeError, OSError):
         return []
 
 

@@ -154,7 +154,7 @@ def load_benchmark_history(working_dir: str) -> list[dict]:
     for f in sorted(bench_dir.glob("run_*.json")):
         try:
             runs.append(json.loads(f.read_text()))
-        except Exception:
+        except (json.JSONDecodeError, OSError):
             continue
     return runs
 

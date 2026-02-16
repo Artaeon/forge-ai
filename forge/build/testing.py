@@ -143,7 +143,7 @@ def _refine_suite(
                     suite.test_commands = []
                 if "build" not in scripts:
                     suite.build_commands = []
-            except Exception:
+            except (json.JSONDecodeError, OSError):
                 pass
 
     return suite
@@ -157,7 +157,7 @@ def _dep_file_contains(wd: Path, package: str) -> bool:
             try:
                 if package in fpath.read_text(errors="replace").lower():
                     return True
-            except Exception:
+            except (OSError, PermissionError):
                 pass
     return False
 

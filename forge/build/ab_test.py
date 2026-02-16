@@ -125,7 +125,7 @@ def save_ab_result(working_dir: str, result: ABTestResult) -> Path:
     if results_file.exists():
         try:
             existing = json.loads(results_file.read_text())
-        except Exception:
+        except (json.JSONDecodeError, OSError):
             pass
 
     existing.append(asdict(result))
@@ -140,7 +140,7 @@ def load_ab_results(working_dir: str) -> list[dict]:
         return []
     try:
         return json.loads(results_file.read_text())
-    except Exception:
+    except (json.JSONDecodeError, OSError):
         return []
 
 
