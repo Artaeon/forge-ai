@@ -186,3 +186,177 @@ def build_history_summary(rounds: list[dict], max_total: int = 1000) -> str:
         result = result[:max_total] + "\n..."
 
     return result
+
+
+# ─── Smart File Chunking ──────────────────────────────────────
+
+
+@dataclass
+class FileChunk:
+    """A chunk of a file with metadata."""
+    path: str
+    content: str
+    start_line: int
+    end_line: int
+    priority: int  # 0=highest priority
+
+    @property
+    def token_estimate(self) -> int:
+        """Rough token estimate (~4 chars per token)."""
+        return len(self.content) // 4
+
+
+def _file_priority(path: str) -> int:
+    """Score file importance (lower = more important)."""
+    name = Path(path).name.lower()
+    # Config files are critical context
+    if name in ("pyproject.toml", "package.json", "cargo.toml", "go.mod"):
+        return 0
+    if name in ("readme.md", "readme.rst", "readme.txt"):
+        return 1
+    # Entry points
+    if name in ("main.py", "app.py", "index.js", "index.ts", "main.go"):
+        return 2
+    if name in ("cli.py", "server.py", "__init__.py"):
+        return 3
+    # Test files are lower priority for code generation
+    if "test" in name:
+        return 7
+    # Regular source files
+    return 5
+
+
+def chunk_file(path: str, content: str, max_chunk_chars: int = 2000) -> list[FileChunk]:
+    """Split a file into semantic chunks at function/class boundaries.
+
+    For files under max_chunk_chars, returns the whole file as one chunk.
+    For larger files, splits at class/function definitions.
+    """
+    if len(content) <= max_chunk_chars:
+        return [FileChunk(
+            path=path, content=content,
+            start_line=1, end_line=content.count("\n") + 1,
+            priority=_file_priority(path),
+        )]
+
+    lines = content.split("\n")
+    chunks: list[FileChunk] = []
+    chunk_lines: list[str] = []
+    chunk_start = 1
+
+    for i, line in enumerate(lines, 1):
+        # Split at class/function definitions when chunk is big enough
+        is_boundary = (
+            line.startswith(("def ", "class ", "async def "))
+            or line.startswith(("function ", "export function ", "export default "))
+            or line.startswith(("func ", "type ", "struct "))
+        )
+
+        if is_boundary and len("\n".join(chunk_lines)) > max_chunk_chars // 2:
+            chunks.append(FileChunk(
+                path=path,
+                content="\n".join(chunk_lines),
+                start_line=chunk_start,
+                end_line=i - 1,
+                priority=_file_priority(path),
+            ))
+            chunk_lines = []
+            chunk_start = i
+
+        chunk_lines.append(line)
+
+    # Final chunk
+    if chunk_lines:
+        chunks.append(FileChunk(
+            path=path,
+            content="\n".join(chunk_lines),
+            start_line=chunk_start,
+            end_line=len(lines),
+            priority=_file_priority(path),
+        ))
+
+    return chunks
+
+
+def select_context_window(
+    working_dir: str,
+    token_budget: int = 8000,
+    focus_files: list[str] | None = None,
+) -> str:
+    """Select the most relevant file content within a token budget.
+
+    Prioritizes: focus_files > config > entry points > source.
+    Each file is chunked at semantic boundaries and included
+    until the budget is exhausted.
+    """
+    wd = Path(working_dir)
+    if not wd.exists():
+        return ""
+
+    skip = {".git", "__pycache__", "node_modules", ".venv", "venv",
+            ".tox", ".mypy_cache", ".pytest_cache", ".ruff_cache"}
+
+    # Gather all file chunks
+    all_chunks: list[FileChunk] = []
+
+    for p in sorted(wd.rglob("*")):
+        if not p.is_file():
+            continue
+        rel = str(p.relative_to(wd))
+        if any(part in skip or part.startswith(".") for part in Path(rel).parts):
+            continue
+        # Skip binary files
+        if p.suffix in (".pyc", ".pyo", ".so", ".dll", ".exe", ".whl", ".egg"):
+            continue
+        try:
+            content = p.read_text(errors="replace")
+        except Exception:
+            continue
+
+        chunks = chunk_file(rel, content)
+
+        # Boost priority of focus files
+        if focus_files and rel in focus_files:
+            for c in chunks:
+                c.priority = -1  # Highest priority
+
+        all_chunks.extend(chunks)
+
+    # Sort by priority (lower = more important)
+    all_chunks.sort(key=lambda c: (c.priority, c.start_line))
+
+    # Select chunks within budget
+    selected: list[FileChunk] = []
+    remaining = token_budget
+
+    for chunk in all_chunks:
+        tokens = chunk.token_estimate
+        if tokens <= remaining:
+            selected.append(chunk)
+            remaining -= tokens
+        elif remaining > 200:
+            # Partial include: truncate
+            chars = remaining * 4
+            truncated = FileChunk(
+                path=chunk.path,
+                content=chunk.content[:chars] + "\n... (truncated)",
+                start_line=chunk.start_line,
+                end_line=chunk.end_line,
+                priority=chunk.priority,
+            )
+            selected.append(truncated)
+            break
+        else:
+            break
+
+    # Format output
+    parts = []
+    current_file = None
+    for chunk in selected:
+        if chunk.path != current_file:
+            current_file = chunk.path
+            parts.append(f"\n--- {chunk.path} (L{chunk.start_line}-{chunk.end_line}) ---")
+        parts.append(chunk.content)
+
+    return "\n".join(parts)
+
