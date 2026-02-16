@@ -28,7 +28,7 @@ from rich.markdown import Markdown
 
 from forge.agents.base import AgentResult, AgentStatus, TaskContext
 from forge.engine import ForgeEngine
-from forge.build.compact import gather_compact, summarize_round, build_history_summary
+from forge.build.compact import gather_compact, build_history_summary
 
 console = Console()
 
@@ -171,26 +171,59 @@ class DuoBuildPipeline:
     async def _plan(self, objective: str) -> DuoRound:
         """Planner creates the project architecture and README."""
         prompt = (
-            f"ROLE: Project architect\n"
+            f"You are a senior software architect designing a production-ready project.\n\n"
             f"OBJECTIVE: {objective}\n\n"
-            f"Create a concise project plan:\n"
-            f"1. Tech stack and dependencies\n"
-            f"2. File list with one-line descriptions\n"
-            f"3. Key architecture decisions\n\n"
-            f"Be specific about file paths. Keep it concise — this goes to a coder agent."
+            f"Create a detailed project plan with these sections:\n\n"
+            f"## 1. README.md Content\n"
+            f"Write the FULL README.md including:\n"
+            f"- Project name and one-line description\n"
+            f"- Features list (bullet points)\n"
+            f"- Installation instructions (exact commands)\n"
+            f"- Usage examples with code blocks\n"
+            f"- Configuration options (if any)\n\n"
+            f"## 2. File Structure\n"
+            f"List EVERY file to create with:\n"
+            f"- Full relative path\n"
+            f"- One-line purpose description\n"
+            f"- Key classes/functions it should contain\n\n"
+            f"## 3. Tech Stack\n"
+            f"- Language and version requirements\n"
+            f"- Dependencies with version constraints (e.g. click>=8.0)\n"
+            f"- Dev dependencies (pytest, ruff, etc.)\n\n"
+            f"## 4. Architecture\n"
+            f"- Data flow between modules\n"
+            f"- Key design patterns (e.g. factory, strategy, plugin)\n"
+            f"- Error handling strategy\n"
+            f"- Testing strategy (what to test, how)\n\n"
+            f"Be precise with file paths and function signatures. "
+            f"Another AI agent will implement this — ambiguity causes poor code."
         )
         return await self._dispatch(PHASE_PLAN, self.planner, prompt)
 
     async def _code(self, objective: str, plan: str) -> DuoRound:
         """Coder implements the full project from the plan."""
-        # Summarize the plan to avoid passing 5K+ raw tokens
-        compact_plan = summarize_round(self.planner, PHASE_PLAN, plan, max_chars=2000)
+        # Pass the FULL plan — it's the blueprint, don't summarize it
+        # Truncate only if extremely long (>8K chars)
+        if len(plan) > 8000:
+            plan_text = plan[:7500] + "\n\n... (plan truncated for length)"
+        else:
+            plan_text = plan
+
         prompt = (
-            f"ROLE: Software engineer — implement this project.\n"
+            f"You are a senior software engineer. Implement this project completely.\n\n"
             f"OBJECTIVE: {objective}\n\n"
-            f"PLAN:\n{compact_plan}\n\n"
-            f"Dir: {self.working_dir}\n\n"
-            f"Create ALL files. Write complete production code, no placeholders."
+            f"PROJECT PLAN:\n{plan_text}\n\n"
+            f"Working directory: {self.working_dir}\n\n"
+            f"QUALITY STANDARDS:\n"
+            f"- Create ALL files from the plan — missing files = failed build\n"
+            f"- Write COMPLETE code — no TODOs, no placeholders, no 'implement later'\n"
+            f"- Include proper type hints, docstrings, and error handling\n"
+            f"- Add __init__.py files for all packages\n"
+            f"- Create pyproject.toml (or package.json) with all dependencies\n"
+            f"- Write at least one test file with real test cases\n"
+            f"- Create a proper .gitignore\n"
+            f"- The README.md should match what the plan specified\n\n"
+            f"Write production-ready code that works out of the box after install."
         )
         return await self._dispatch_agentic(PHASE_CODE, self.coder, prompt)
 
@@ -205,40 +238,121 @@ class DuoBuildPipeline:
             max_total=800,
         )
 
+        # Read key files for the reviewer to actually inspect
+        file_samples = self._read_key_files_for_review()
+
         prompt = (
-            f"ROLE: Senior code reviewer\n"
+            f"You are a senior code reviewer performing a thorough quality audit.\n\n"
             f"OBJECTIVE: {objective}\n"
-            f"Review {iteration}/{self.max_rounds}\n\n"
-            f"PROJECT: {ctx.to_prompt()}\n\n"
+            f"Review round: {iteration}/{self.max_rounds}\n\n"
+            f"PROJECT FILES: {ctx.to_prompt()}\n\n"
         )
 
+        if file_samples:
+            prompt += f"KEY FILE CONTENTS:\n{file_samples}\n\n"
+
         if history:
-            prompt += f"HISTORY:\n{history}\n\n"
+            prompt += f"PREVIOUS ROUNDS:\n{history}\n\n"
 
         prompt += (
-            f"Review for: bugs, missing features, error handling, tests, structure.\n"
-            f"If COMPLETE and PRODUCTION-READY, start with APPROVED.\n"
-            f"If NOT, list issues concisely (max 5 bullet points)."
+            f"REVIEW CRITERIA (check each):\n"
+            f"1. COMPLETENESS — Does the code fully implement the objective?\n"
+            f"2. CORRECTNESS — Are there bugs, logic errors, or crashes?\n"
+            f"3. STRUCTURE — Is the code well-organized with proper separation?\n"
+            f"4. QUALITY — Type hints, docstrings, error handling present?\n"
+            f"5. TESTS — Do test files exist with meaningful test cases?\n"
+            f"6. PACKAGING — Is there pyproject.toml/package.json with deps?\n"
+            f"7. DOCS — Does README have install + usage instructions?\n\n"
+            f"RESPONSE FORMAT:\n"
+            f"If the project is COMPLETE and PRODUCTION-READY, respond:\n"
+            f"APPROVED\n"
+            f"[brief summary of what's good]\n\n"
+            f"If NOT ready, respond with:\n"
+            f"ISSUES:\n"
+            f"- [CRITICAL] file.py: description of critical bug\n"
+            f"- [MISSING] description of missing feature\n"
+            f"- [QUALITY] file.py: quality improvement needed\n\n"
+            f"List max 7 issues, prioritized by severity. Be specific with file names."
         )
         return await self._dispatch(PHASE_REVIEW, self.planner, prompt)
 
     async def _fix(self, objective: str, review_feedback: str, iteration: int) -> DuoRound:
         """Coder fixes issues identified in the review."""
-        # Extract only the actionable issues from review
-        compact_feedback = summarize_round(
-            self.planner, PHASE_REVIEW, review_feedback, max_chars=1000
-        )
         ctx = gather_compact(self.working_dir)
 
+        # Pass FULL review feedback — the specific issues are critical context
+        if len(review_feedback) > 3000:
+            feedback_text = review_feedback[:2500] + "\n\n... (truncated)"
+        else:
+            feedback_text = review_feedback
+
         prompt = (
-            f"ROLE: Software engineer — fix review issues.\n"
+            f"You are a senior software engineer fixing issues from a code review.\n\n"
             f"OBJECTIVE: {objective}\n\n"
-            f"ISSUES TO FIX:\n{compact_feedback}\n\n"
-            f"PROJECT: {ctx.to_prompt()}\n\n"
-            f"Dir: {self.working_dir}\n"
-            f"Fix iteration {iteration}. Address every issue. Make changes directly."
+            f"REVIEW FEEDBACK — fix ALL of these:\n{feedback_text}\n\n"
+            f"CURRENT PROJECT: {ctx.to_prompt()}\n"
+            f"Working directory: {self.working_dir}\n\n"
+            f"INSTRUCTIONS:\n"
+            f"- Fix every issue listed in the review\n"
+            f"- Create any missing files mentioned\n"
+            f"- Don't break existing working code while fixing\n"
+            f"- After fixing, verify the project still runs/imports correctly\n\n"
+            f"Fix iteration: {iteration}/{self.max_rounds}"
         )
         return await self._dispatch_agentic(PHASE_FIX, self.coder, prompt)
+
+    def _read_key_files_for_review(self, max_total_chars: int = 4000) -> str:
+        """Read key project files for the reviewer to inspect.
+
+        Returns a compact representation of important source files.
+        Prioritizes: entry points, config files, core modules.
+        """
+        wd = Path(self.working_dir)
+        priority_patterns = [
+            "README.md", "pyproject.toml", "package.json", "setup.py",
+            "requirements.txt",
+        ]
+        # Then scan for source files
+        source_exts = {".py", ".js", ".ts", ".go", ".rs", ".java"}
+
+        files_to_read: list[Path] = []
+
+        # Priority files first
+        for pattern in priority_patterns:
+            f = wd / pattern
+            if f.exists():
+                files_to_read.append(f)
+
+        # Source files (skip tests, sort by size — smaller = more likely core)
+        skip = {".git", "__pycache__", "node_modules", ".venv", "venv"}
+        source_files = []
+        for p in wd.rglob("*"):
+            if p.is_file() and p.suffix in source_exts:
+                rel = p.relative_to(wd)
+                if not any(part in skip or part.startswith(".") for part in rel.parts):
+                    source_files.append(p)
+        source_files.sort(key=lambda p: p.stat().st_size)
+        files_to_read.extend(source_files[:10])
+
+        # Read files with truncation
+        parts = []
+        total = 0
+        for f in files_to_read:
+            if total >= max_total_chars:
+                break
+            try:
+                content = f.read_text(errors="replace")
+                rel = str(f.relative_to(wd))
+                budget = min(len(content), max_total_chars - total, 1500)
+                snippet = content[:budget]
+                if len(content) > budget:
+                    snippet += f"\n... ({len(content) - budget} more chars)"
+                parts.append(f"--- {rel} ---\n{snippet}")
+                total += len(snippet)
+            except Exception:
+                continue
+
+        return "\n\n".join(parts)
 
     # ─── Dispatch helpers ─────────────────────────────────────
 
