@@ -142,7 +142,8 @@ class DuoBuildPipeline:
 
         self._print_output(code_round)
 
-        # ── Phase 2.5: Initial VERIFY ─────────────────────────
+        # ── Phase 2.5: Install deps + VERIFY ──────────────────
+        self._install_deps()
         verify_result = await self._verify(objective)
         self._track_round(result, verify_result)
         self._print_output(verify_result)
@@ -187,7 +188,8 @@ class DuoBuildPipeline:
             self._track_round(result, fix_round)
             self._print_output(fix_round)
 
-            # Re-verify after fix
+            # Re-install deps + re-verify after fix
+            self._install_deps()
             verify_result = await self._verify(objective)
             self._track_round(result, verify_result)
             self._print_output(verify_result)
@@ -239,6 +241,89 @@ class DuoBuildPipeline:
                 f"[yellow]⚠ Coder '{self.coder}' has no agentic mode — "
                 f"files may not be created on disk[/]"
             )
+
+    # ─── Dependency Install ────────────────────────────────────
+
+    def _install_deps(self) -> None:
+        """Auto-install project dependencies before verification.
+
+        Detects project type and runs the appropriate install command:
+        - Python: pip install -e . (if pyproject.toml/setup.py) or pip install -r requirements.txt
+        - Node.js: npm install (if package.json)
+        """
+        wd = Path(self.working_dir)
+
+        installed = False
+
+        # Python projects
+        if (wd / "pyproject.toml").exists() or (wd / "setup.py").exists():
+            console.print("[dim]  📦 Installing Python deps (pip install -e .)...[/]")
+            try:
+                result = subprocess.run(
+                    ["pip", "install", "-e", ".", "-q"],
+                    cwd=self.working_dir, capture_output=True, text=True, timeout=120,
+                )
+                if result.returncode == 0:
+                    console.print("[dim]  ✅ Python deps installed[/]")
+                    installed = True
+                else:
+                    err = (result.stderr or result.stdout)[:300]
+                    console.print(f"[dim]  ⚠ pip install failed: {err}[/]")
+            except Exception as e:
+                console.print(f"[dim]  ⚠ pip install error: {e}[/]")
+        elif (wd / "requirements.txt").exists():
+            console.print("[dim]  📦 Installing Python deps (pip install -r)...[/]")
+            try:
+                result = subprocess.run(
+                    ["pip", "install", "-r", "requirements.txt", "-q"],
+                    cwd=self.working_dir, capture_output=True, text=True, timeout=120,
+                )
+                if result.returncode == 0:
+                    console.print("[dim]  ✅ Python deps installed[/]")
+                    installed = True
+                else:
+                    err = (result.stderr or result.stdout)[:300]
+                    console.print(f"[dim]  ⚠ pip install failed: {err}[/]")
+            except Exception as e:
+                console.print(f"[dim]  ⚠ pip install error: {e}[/]")
+
+        # Node.js projects
+        if (wd / "package.json").exists() and not (wd / "node_modules").exists():
+            console.print("[dim]  📦 Installing Node deps (npm install)...[/]")
+            try:
+                result = subprocess.run(
+                    ["npm", "install", "--silent"],
+                    cwd=self.working_dir, capture_output=True, text=True, timeout=120,
+                )
+                if result.returncode == 0:
+                    console.print("[dim]  ✅ Node deps installed[/]")
+                    installed = True
+                else:
+                    err = (result.stderr or result.stdout)[:300]
+                    console.print(f"[dim]  ⚠ npm install failed: {err}[/]")
+            except Exception as e:
+                console.print(f"[dim]  ⚠ npm install error: {e}[/]")
+
+        if not installed:
+            # Check for Go/Rust
+            if (wd / "go.mod").exists():
+                try:
+                    subprocess.run(
+                        ["go", "mod", "download"],
+                        cwd=self.working_dir, capture_output=True, timeout=60,
+                    )
+                    console.print("[dim]  ✅ Go deps downloaded[/]")
+                except Exception:
+                    pass
+            elif (wd / "Cargo.toml").exists():
+                try:
+                    subprocess.run(
+                        ["cargo", "fetch", "-q"],
+                        cwd=self.working_dir, capture_output=True, timeout=60,
+                    )
+                    console.print("[dim]  ✅ Rust deps fetched[/]")
+                except Exception:
+                    pass
 
     # ─── Scaffolding ──────────────────────────────────────────
 
