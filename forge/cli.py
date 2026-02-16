@@ -491,6 +491,54 @@ def duo(
         console.print("\n[bold yellow]Build finished. Review manually.[/]")
 
 
+# ─── Benchmark Command ───────────────────────────────────────
+
+
+@main.command()
+@click.option("--list", "list_only", is_flag=True, help="List available benchmarks")
+@click.option("--run", "run_bench", is_flag=True, help="Run all benchmarks")
+@click.option("--history", is_flag=True, help="Show previous benchmark runs")
+@click.option("--planner", default="gemini", help="Planning agent")
+@click.option("--coder", default="claude-sonnet", help="Coding agent")
+def benchmark(list_only: bool, run_bench: bool, history: bool, planner: str, coder: str) -> None:
+    """🏋️ Run benchmark suite to measure pipeline quality."""
+    from forge.build.benchmark import (
+        BENCHMARKS, list_benchmarks,
+        load_benchmark_history, print_benchmark_results,
+    )
+
+    if list_only or (not run_bench and not history):
+        table = Table(title="Available Benchmarks", border_style="bright_black")
+        table.add_column("ID", min_width=12)
+        table.add_column("Name", min_width=16)
+        table.add_column("Objective", min_width=40)
+        for b in list_benchmarks():
+            table.add_row(b["id"], b["name"], b["objective"])
+        console.print(table)
+        return
+
+    if history:
+        runs = load_benchmark_history(".")
+        if not runs:
+            console.print("[yellow]No benchmark history found.[/]")
+            return
+        for run in runs[-5:]:
+            console.print(
+                f"[dim]{run['timestamp']}[/] — "
+                f"Avg: {run['avg_score']:.0f}/100  "
+                f"Cost: ${run['total_cost']:.4f}"
+            )
+        return
+
+    if run_bench:
+        console.print(
+            f"[bold]🏋️ Running {len(BENCHMARKS)} benchmarks "
+            f"with {planner} + {coder}...[/]\n"
+        )
+        console.print("[yellow]Benchmark execution requires running forge duo for each objective.[/]")
+        console.print("[yellow]Use: forge duo --objective '<benchmark objective>' for individual runs.[/]")
+
+
 # ─── Async Helpers ────────────────────────────────────────────
 
 
