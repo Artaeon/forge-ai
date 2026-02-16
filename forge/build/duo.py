@@ -107,6 +107,7 @@ class DuoBuildPipeline:
         self.max_rounds = max_rounds
         self.auto_commit = auto_commit
         self.timeout = timeout
+        self.interactive = False
         self.rounds: list[DuoRound] = []
         self._running_cost: float = 0.0
         self._running_time: int = 0
@@ -131,6 +132,19 @@ class DuoBuildPipeline:
             return result
 
         self._print_output(plan)
+
+        # Interactive: pause after plan for user review
+        if self.interactive:
+            action = self._interactive_pause(
+                "Review the plan above. Continue to coding?",
+                allow_feedback=True,
+            )
+            if action == "abort":
+                console.print("[yellow]Build aborted by user.[/]")
+                return result
+            elif action and action != "continue":
+                # User provided feedback — append to plan
+                plan.output += f"\n\nUSER FEEDBACK: {action}"
 
         # ── Phase 2: CODE ─────────────────────────────────────
         self._print_phase(PHASE_CODE, self.coder, "Implementing from plan...")
@@ -177,6 +191,19 @@ class DuoBuildPipeline:
                 )
                 break
 
+            # Interactive: pause after review for user feedback
+            if self.interactive:
+                action = self._interactive_pause(
+                    "Review the feedback above. Continue fixing?",
+                    allow_feedback=True,
+                )
+                if action == "abort":
+                    console.print("[yellow]Build aborted by user.[/]")
+                    break
+                elif action and action != "continue":
+                    # Append user notes to review
+                    review.output += f"\n\nADDITIONAL USER FEEDBACK: {action}"
+
             # Fix — gets real errors, not just review comments
             self._print_phase(
                 PHASE_FIX, self.coder,
@@ -216,6 +243,44 @@ class DuoBuildPipeline:
         cost_str = f"${self._running_cost:.4f}" if self._running_cost > 0 else "—"
         time_str = f"{self._running_time / 1000:.1f}s"
         console.print(f"[dim]    ⏱  {time_str}  💰 {cost_str}[/]")
+
+    # ─── Interactive Mode ─────────────────────────────────────
+
+    def _interactive_pause(
+        self, message: str, allow_feedback: bool = False,
+    ) -> str:
+        """Pause for user input in interactive mode.
+
+        Returns:
+            "continue" — user approved
+            "abort" — user wants to stop
+            str — user-provided feedback (if allow_feedback=True)
+        """
+        console.print(f"\n[bold yellow]⏸  {message}[/]")
+
+        if allow_feedback:
+            console.print(
+                "[dim]  Enter: continue  |  n: abort  |  "
+                "Type feedback to add notes[/]"
+            )
+        else:
+            console.print("[dim]  Enter: continue  |  n: abort[/]")
+
+        try:
+            response = input("  > ").strip()
+        except (EOFError, KeyboardInterrupt):
+            return "abort"
+
+        if not response or response.lower() in ("y", "yes", ""):
+            return "continue"
+        if response.lower() in ("n", "no", "abort", "quit", "q"):
+            return "abort"
+
+        # User typed feedback
+        if allow_feedback:
+            return response
+
+        return "continue"
 
     # ─── Agent Validation ─────────────────────────────────────
 

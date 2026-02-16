@@ -404,6 +404,7 @@ def init_project(template: str, target_dir: str, list_only: bool) -> None:
 @click.option("--dir", "-d", "work_dir", default=".", help="Working directory")
 @click.option("--new", "new_project", default=None, help="Create new project directory")
 @click.option("--no-commit", is_flag=True, help="Skip auto-commit")
+@click.option("--interactive", "-i", is_flag=True, help="Pause for review after plan and review phases")
 @click.option("--timeout", "-t", default=300, type=int, help="Timeout per agent call (seconds)")
 def duo(
     objective: str,
@@ -413,6 +414,7 @@ def duo(
     work_dir: str,
     new_project: str | None,
     no_commit: bool,
+    interactive: bool,
     timeout: int,
 ) -> None:
     """Collaborative build — two agents iterate toward v1.
@@ -476,6 +478,7 @@ def duo(
         auto_commit=not no_commit,
         timeout=timeout,
     )
+    pipeline.interactive = interactive
 
     result = asyncio.run(pipeline.run(objective))
 
