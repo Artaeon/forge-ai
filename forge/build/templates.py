@@ -157,6 +157,162 @@ def test_hello():
             "README.md": "# Next.js App\n\nRun `npx create-next-app@latest .` to initialize.\n",
         },
     ),
+
+    "python-lib": (
+        "Python library with src-layout, pyproject.toml, tests",
+        {
+            "pyproject.toml": '''[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "mylib"
+version = "0.1.0"
+description = "A Python library"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "ruff>=0.4"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+''',
+            "src/mylib/__init__.py": '"""mylib — a Python library."""\n\n__version__ = "0.1.0"\n',
+            "src/mylib/core.py": '"""Core module."""\n\n\ndef hello(name: str) -> str:\n    """Return a greeting."""\n    return f"Hello, {name}!"\n',
+            "tests/__init__.py": "",
+            "tests/test_core.py": '''"""Tests for core module."""
+
+from mylib.core import hello
+
+
+def test_hello():
+    assert hello("World") == "Hello, World!"
+''',
+            "README.md": "# mylib\n\nA Python library.\n\n## Installation\n\n```bash\npip install -e .\n```\n\n## Usage\n\n```python\nfrom mylib.core import hello\nprint(hello(\"World\"))\n```\n",
+            ".gitignore": "__pycache__/\n*.pyc\n.venv/\nvenv/\ndist/\n*.egg-info/\n",
+        },
+    ),
+
+    "mcp-server": (
+        "MCP server with tool definitions and httpx",
+        {
+            "pyproject.toml": '''[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "mcp-server"
+version = "0.1.0"
+description = "An MCP server"
+requires-python = ">=3.10"
+dependencies = [
+    "mcp>=1.0",
+    "httpx>=0.27",
+    "click>=8.0",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+mcp-server = "server:main"
+''',
+            "server.py": '''"""MCP server entrypoint."""
+
+import click
+
+
+@click.command()
+@click.option("--port", default=3000, help="Port to listen on")
+def main(port: int) -> None:
+    """Start the MCP server."""
+    click.echo(f"Starting MCP server on port {port}...")
+    # TODO: Initialize MCP server
+
+
+if __name__ == "__main__":
+    main()
+''',
+            "tools.py": '"""MCP tool definitions."""\n\n\ndef list_tools() -> list[dict]:\n    """Return available MCP tools."""\n    return []\n',
+            "tests/__init__.py": "",
+            "tests/test_server.py": '''"""Tests for MCP server."""
+
+from click.testing import CliRunner
+from server import main
+
+
+def test_cli_help():
+    runner = CliRunner()
+    result = runner.invoke(main, ["--help"])
+    assert result.exit_code == 0
+    assert "MCP server" in result.output
+''',
+            "README.md": "# MCP Server\n\nAn MCP (Model Context Protocol) server.\n\n## Installation\n\n```bash\npip install -e .\n```\n\n## Usage\n\n```bash\nmcp-server --port 3000\n```\n",
+            ".gitignore": "__pycache__/\n*.pyc\n.venv/\nvenv/\n",
+        },
+    ),
+
+    "express-api": (
+        "Express.js REST API with tests",
+        {
+            "package.json": '''{
+  "name": "api",
+  "version": "0.1.0",
+  "description": "Express REST API",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js",
+    "test": "jest"
+  },
+  "dependencies": {
+    "express": "^4.18.0",
+    "cors": "^2.8.5"
+  },
+  "devDependencies": {
+    "jest": "^29.0.0",
+    "supertest": "^6.3.0"
+  }
+}
+''',
+            "src/index.js": '''const express = require("express");
+const cors = require("cors");
+
+const app = express();
+app.use(cors());
+app.use(express.json());
+
+app.get("/health", (req, res) => {
+  res.json({ status: "ok" });
+});
+
+const PORT = process.env.PORT || 3000;
+if (require.main === module) {
+  app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+}
+
+module.exports = app;
+''',
+            "tests/app.test.js": '''const request = require("supertest");
+const app = require("../src/index");
+
+describe("API", () => {
+  test("GET /health returns ok", async () => {
+    const res = await request(app).get("/health");
+    expect(res.statusCode).toBe(200);
+    expect(res.body.status).toBe("ok");
+  });
+});
+''',
+            "README.md": "# Express API\n\n## Install\n\n```bash\nnpm install\n```\n\n## Run\n\n```bash\nnpm run dev\n```\n\n## Test\n\n```bash\nnpm test\n```\n",
+            ".gitignore": "node_modules/\n.env\n",
+        },
+    ),
 }
 
 
@@ -187,3 +343,34 @@ def scaffold_template(template_name: str, target_dir: str) -> list[str]:
         created.append(rel_path)
 
     return created
+
+
+def detect_template(objective: str) -> str | None:
+    """Auto-detect the best template based on objective keywords.
+
+    Returns template name or None if no match.
+    """
+    obj_lower = objective.lower()
+
+    # Keyword → template mapping (ordered by specificity)
+    keyword_map = [
+        (["mcp", "model context protocol"], "mcp-server"),
+        (["flask", "flask api"], "flask-api"),
+        (["fastapi", "fast api"], "fastapi"),
+        (["express", "node api", "node.js api"], "express-api"),
+        (["next.js", "nextjs", "next js"], "nextjs"),
+        (["cli", "command-line", "command line", "terminal tool"], "cli-tool"),
+        (["library", "package", "sdk", "pip install"], "python-lib"),
+    ]
+
+    for keywords, template in keyword_map:
+        if any(kw in obj_lower for kw in keywords):
+            return template
+
+    # Fallback: detect language-level templates
+    if any(w in obj_lower for w in ["python", "py ", ".py"]):
+        return "python-lib"
+    if any(w in obj_lower for w in ["javascript", "node", "npm"]):
+        return "express-api"
+
+    return None
