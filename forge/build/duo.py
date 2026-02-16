@@ -515,8 +515,8 @@ class DuoBuildPipeline:
     # ─── Phase: VERIFY ────────────────────────────────────────
 
     async def _verify(self, objective: str) -> DuoRound:
-        """Run build + tests and capture real errors."""
-        self._print_phase(PHASE_VERIFY, "system", "Running build & tests...")
+        """Run build + lint + tests and capture real errors."""
+        self._print_phase(PHASE_VERIFY, "system", "Running build, lint & tests...")
 
         suite = detect_verification_suite(self.working_dir)
         errors: list[str] = []
@@ -525,29 +525,61 @@ class DuoBuildPipeline:
         if not suite.has_commands:
             output_parts.append("No verification commands detected for this project type.")
         else:
-            for cmd in suite.all_commands:
+            # Run each category with clear labels
+            categories = [
+                ("🔨 BUILD", suite.build_commands),
+                ("🔍 LINT", suite.lint_commands),
+                ("🧪 TESTS", suite.test_commands),
+            ]
+
+            # Syntax check first
+            if suite.syntax_check:
                 try:
                     result = subprocess.run(
-                        cmd, shell=True, capture_output=True, text=True,
-                        cwd=self.working_dir, timeout=60,
+                        suite.syntax_check, shell=True, capture_output=True,
+                        text=True, cwd=self.working_dir, timeout=30,
                     )
-                    stdout = result.stdout.strip()
-                    stderr = result.stderr.strip()
-                    combined = (stdout + "\n" + stderr).strip()
-
                     if result.returncode != 0:
-                        errors.append(f"$ {cmd}\nExit code: {result.returncode}\n{combined}")
-                        output_parts.append(f"❌ {cmd} → FAILED\n{combined[:500]}")
+                        combined = (result.stdout + "\n" + result.stderr).strip()
+                        errors.append(f"SYNTAX CHECK:\n{combined}")
+                        output_parts.append(f"❌ SYNTAX: {combined[:300]}")
                     else:
-                        output_parts.append(f"✅ {cmd} → OK")
-                        if combined:
-                            output_parts.append(f"   {combined[:200]}")
-                except subprocess.TimeoutExpired:
-                    errors.append(f"$ {cmd}\nTIMEOUT after 60s")
-                    output_parts.append(f"⏰ {cmd} → TIMEOUT")
+                        output_parts.append("✅ SYNTAX: OK")
                 except Exception as e:
-                    errors.append(f"$ {cmd}\nERROR: {e}")
-                    output_parts.append(f"❌ {cmd} → ERROR: {e}")
+                    output_parts.append(f"⚠ SYNTAX: {e}")
+
+            for category_name, commands in categories:
+                if not commands:
+                    continue
+
+                for cmd in commands:
+                    try:
+                        result = subprocess.run(
+                            cmd, shell=True, capture_output=True, text=True,
+                            cwd=self.working_dir, timeout=60,
+                        )
+                        stdout = result.stdout.strip()
+                        stderr = result.stderr.strip()
+                        combined = (stdout + "\n" + stderr).strip()
+
+                        if result.returncode != 0:
+                            errors.append(
+                                f"{category_name}:\n$ {cmd}\n"
+                                f"Exit code: {result.returncode}\n{combined}"
+                            )
+                            output_parts.append(
+                                f"❌ {category_name}: {cmd}\n{combined[:500]}"
+                            )
+                        else:
+                            output_parts.append(f"✅ {category_name}: {cmd}")
+                            if combined:
+                                output_parts.append(f"   {combined[:200]}")
+                    except subprocess.TimeoutExpired:
+                        errors.append(f"{category_name}:\n$ {cmd}\nTIMEOUT after 60s")
+                        output_parts.append(f"⏰ {category_name}: {cmd} → TIMEOUT")
+                    except Exception as e:
+                        errors.append(f"{category_name}:\n$ {cmd}\nERROR: {e}")
+                        output_parts.append(f"❌ {category_name}: {cmd} → {e}")
 
         # Also run validation gate
         validation = validate_project(self.working_dir)
@@ -570,7 +602,7 @@ class DuoBuildPipeline:
             round_number=len(self.rounds) + 1,
             phase=PHASE_VERIFY,
             agent_name="system",
-            prompt="verify build & tests",
+            prompt="verify build, lint & tests",
             output="\n".join(output_parts),
             success=success,
             errors=error_text,

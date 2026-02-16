@@ -40,7 +40,7 @@ class VerificationSuite:
 _PYTHON_SUITE = VerificationSuite(
     syntax_check="python3 -m py_compile $(find . -name '*.py' -not -path './.venv/*' -not -path './venv/*' | head -20) 2>&1 || true",
     test_commands=["python3 -m pytest -x --tb=short 2>&1 || python3 -m unittest discover -s . -p 'test_*.py' 2>&1"],
-    lint_commands=[],
+    lint_commands=["python3 -m ruff check . 2>&1 || true"],
     build_commands=[],
 )
 
