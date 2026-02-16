@@ -35,6 +35,7 @@ from forge.build.compact import gather_compact, build_history_summary
 from forge.build.validate import validate_project
 from forge.build.templates import detect_template, scaffold_template
 from forge.build.testing import detect_verification_suite
+from forge.build.resume import save_state, load_state, clear_state
 
 console = Console()
 
@@ -108,6 +109,7 @@ class DuoBuildPipeline:
         self.auto_commit = auto_commit
         self.timeout = timeout
         self.interactive = False
+        self.resume = False
         self.rounds: list[DuoRound] = []
         self._running_cost: float = 0.0
         self._running_time: int = 0
@@ -119,22 +121,43 @@ class DuoBuildPipeline:
         # ── Agent validation ──────────────────────────────────
         self._validate_agents()
 
+        # ── Resume from saved state ───────────────────────────
+        plan_output = ""
+        skip_to_review = False
+
+        if self.resume:
+            saved = load_state(self.working_dir)
+            if saved:
+                plan_output = saved.get("plan_output", "")
+                last_phase = saved.get("last_phase", "")
+                num_rounds = len(saved.get("rounds", []))
+                console.print(
+                    f"[bold cyan]↩ Resuming from {last_phase} "
+                    f"({num_rounds} rounds completed)[/]"
+                )
+                if last_phase in ("CODE", "VERIFY", "FIX"):
+                    skip_to_review = True
+        
         # ── Phase 0: SCAFFOLD ─────────────────────────────────
-        self._scaffold_if_needed(objective)
+        if not skip_to_review:
+            self._scaffold_if_needed(objective)
 
         # ── Phase 1: PLAN ─────────────────────────────────────
-        self._print_phase(PHASE_PLAN, self.planner, "Creating project plan...")
-        plan = await self._plan(objective)
-        self._track_round(result, plan)
+        if not skip_to_review:
+            self._print_phase(PHASE_PLAN, self.planner, "Creating project plan...")
+            plan = await self._plan(objective)
+            self._track_round(result, plan)
 
-        if not plan.success:
-            console.print(f"[red]Planning failed: {plan.output[:200]}[/]")
-            return result
+            if not plan.success:
+                console.print(f"[red]Planning failed: {plan.output[:200]}[/]")
+                return result
 
-        self._print_output(plan)
+            self._print_output(plan)
+            plan_output = plan.output
+            self._save_pipeline_state(objective, "PLAN", plan_output)
 
         # Interactive: pause after plan for user review
-        if self.interactive:
+        if not skip_to_review and self.interactive:
             action = self._interactive_pause(
                 "Review the plan above. Continue to coding?",
                 allow_feedback=True,
@@ -143,19 +166,20 @@ class DuoBuildPipeline:
                 console.print("[yellow]Build aborted by user.[/]")
                 return result
             elif action and action != "continue":
-                # User provided feedback — append to plan
-                plan.output += f"\n\nUSER FEEDBACK: {action}"
+                plan_output += f"\n\nUSER FEEDBACK: {action}"
 
         # ── Phase 2: CODE ─────────────────────────────────────
-        self._print_phase(PHASE_CODE, self.coder, "Implementing from plan...")
-        code_round = await self._code(objective, plan.output)
-        self._track_round(result, code_round)
+        if not skip_to_review:
+            self._print_phase(PHASE_CODE, self.coder, "Implementing from plan...")
+            code_round = await self._code(objective, plan_output)
+            self._track_round(result, code_round)
 
-        if not code_round.success:
-            console.print(f"[red]Coding failed: {code_round.output[:200]}[/]")
-            return result
+            if not code_round.success:
+                console.print(f"[red]Coding failed: {code_round.output[:200]}[/]")
+                return result
 
-        self._print_output(code_round)
+            self._print_output(code_round)
+            self._save_pipeline_state(objective, "CODE", plan_output)
 
         # ── Phase 2.5: Install deps + VERIFY ──────────────────
         self._install_deps()
@@ -221,6 +245,7 @@ class DuoBuildPipeline:
             verify_result = await self._verify(objective)
             self._track_round(result, verify_result)
             self._print_output(verify_result)
+            self._save_pipeline_state(objective, "VERIFY", plan_output)
 
         # ── Finalize ──────────────────────────────────────────
         result.total_rounds = len(result.rounds)
@@ -229,8 +254,34 @@ class DuoBuildPipeline:
         if self.auto_commit:
             self._auto_commit(objective)
 
+        # Clear state file on successful completion
+        clear_state(self.working_dir)
+
         self._print_summary(result)
         return result
+
+    def _save_pipeline_state(self, objective: str, phase: str, plan_output: str) -> None:
+        """Save current pipeline state for resume capability."""
+        round_data = [
+            {
+                "round_number": r.round_number,
+                "phase": r.phase,
+                "agent_name": r.agent_name,
+                "success": r.success,
+                "duration_ms": r.duration_ms,
+                "cost_usd": r.cost_usd,
+            }
+            for r in self.rounds
+        ]
+        save_state(
+            working_dir=self.working_dir,
+            objective=objective,
+            rounds=round_data,
+            last_phase=phase,
+            plan_output=plan_output,
+            planner=self.planner,
+            coder=self.coder,
+        )
 
     def _track_round(self, result: DuoResult, round_: DuoRound) -> None:
         """Track a round and update running totals."""
