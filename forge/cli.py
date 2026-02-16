@@ -539,6 +539,26 @@ def benchmark(list_only: bool, run_bench: bool, history: bool, planner: str, cod
         console.print("[yellow]Use: forge duo --objective '<benchmark objective>' for individual runs.[/]")
 
 
+# ─── Dashboard Command ───────────────────────────────────────
+
+
+@main.command()
+@click.option("--open", "open_browser", is_flag=True, help="Open in browser")
+def dashboard(open_browser: bool) -> None:
+    """📊 Generate HTML dashboard of run history and scores."""
+    from forge.build.dashboard import generate_dashboard, load_history
+
+    runs = load_history(".")
+    console.print(f"[dim]Found {len(runs)} run(s) in history.[/]")
+
+    path = generate_dashboard(".")
+    console.print(f"[green]✅ Dashboard generated: {path}[/]")
+
+    if open_browser:
+        import webbrowser
+        webbrowser.open(f"file://{path.absolute()}")
+
+
 # ─── Async Helpers ────────────────────────────────────────────
 
 
