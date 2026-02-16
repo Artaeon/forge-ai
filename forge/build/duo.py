@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import subprocess
+import time
 from pathlib import Path
 from dataclasses import dataclass, field
 
@@ -699,6 +700,32 @@ class DuoBuildPipeline:
         except Exception:
             return ""
 
+    async def _execute_with_spinner(self, execute_fn, ctx, phase: str, agent: str):
+        """Execute an agent function with a live progress spinner."""
+        icon = PHASE_ICONS.get(phase, "")
+        start = time.monotonic()
+
+        async def _run_with_status():
+            # Run the actual agent call in background
+            task = asyncio.create_task(execute_fn(ctx))
+
+            # Update spinner while waiting
+            with console.status(
+                f"[bold]{icon} {agent.upper()}[/] working...",
+                spinner="dots",
+            ) as status:
+                while not task.done():
+                    elapsed = time.monotonic() - start
+                    status.update(
+                        f"[bold]{icon} {agent.upper()}[/] working... "
+                        f"[dim]({elapsed:.0f}s)[/]"
+                    )
+                    await asyncio.sleep(1.0)
+
+            return task.result()
+
+        return await _run_with_status()
+
     # ─── Dispatch helpers ─────────────────────────────────────
 
     async def _dispatch(self, phase: str, agent: str, prompt: str) -> DuoRound:
@@ -720,7 +747,7 @@ class DuoBuildPipeline:
                 success=False,
             )
 
-        result = await adapter.execute(ctx)
+        result = await self._execute_with_spinner(adapter.execute, ctx, phase, agent)
 
         return DuoRound(
             round_number=len(self.rounds) + 1,
@@ -760,9 +787,13 @@ class DuoBuildPipeline:
         files_before = set(self._list_project_files())
 
         if hasattr(adapter, "execute_agentic"):
-            result = await adapter.execute_agentic(ctx)
+            result = await self._execute_with_spinner(
+                adapter.execute_agentic, ctx, phase, agent
+            )
         else:
-            result = await adapter.execute(ctx)
+            result = await self._execute_with_spinner(
+                adapter.execute, ctx, phase, agent
+            )
 
         # Check if any files were actually created
         files_after = set(self._list_project_files())
