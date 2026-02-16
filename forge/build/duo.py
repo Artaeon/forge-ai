@@ -37,6 +37,7 @@ from forge.build.templates import detect_template, scaffold_template
 from forge.build.testing import detect_verification_suite
 from forge.build.resume import save_state, load_state, clear_state
 from forge.build.depfix import resolve_missing_deps
+from forge.build.scoring import score_project
 
 console = Console()
 
@@ -1278,3 +1279,21 @@ class DuoBuildPipeline:
                 console.print(f"[dim]   {f}[/]")
             if len(result.files_created) > 20:
                 console.print(f"[dim]   ... and {len(result.files_created) - 20} more[/]")
+
+        # Quality Score
+        score = score_project(self.working_dir)
+        grade_colors = {"A": "bold green", "B": "green", "C": "yellow", "D": "yellow", "F": "red"}
+        color = grade_colors.get(score.grade, "white")
+
+        console.print(
+            f"\n[{color}]{score.emoji} Quality Score: {score.total}/100 "
+            f"(Grade: {score.grade})[/]"
+        )
+        console.print(
+            f"[dim]  Structure: {score.structure}/25  │  "
+            f"Code: {score.code}/25  │  "
+            f"Tests: {score.tests}/25  │  "
+            f"Docs: {score.docs}/25[/]"
+        )
+        for detail in score.details:
+            console.print(f"[dim]  {detail}[/]")
