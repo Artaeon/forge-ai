@@ -16,20 +16,18 @@ Usage:
 
 from __future__ import annotations
 
-import asyncio
+import logging
 import subprocess
 import time
 from pathlib import Path
 from dataclasses import dataclass, field
 
 from rich.console import Console
-from rich.live import Live
 from rich.panel import Panel
 from rich.text import Text
 from rich.table import Table
-from rich.markdown import Markdown
 
-from forge.agents.base import AgentResult, AgentStatus, TaskContext
+from forge.agents.base import TaskContext
 from forge.engine import ForgeEngine
 from forge.build.compact import gather_compact, build_history_summary
 from forge.build.validate import validate_project
@@ -39,7 +37,14 @@ from forge.build.resume import save_state, load_state, clear_state
 from forge.build.depfix import resolve_missing_deps
 from forge.build.scoring import score_project
 
+# Phase modules — extracted from this file for maintainability
+from forge.build.phases.plan import run_plan
+from forge.build.phases.code import run_code
+from forge.build.phases.verify import run_verify
+from forge.build.phases.review import run_review, run_fix
+
 console = Console()
+logger = logging.getLogger(__name__)
 
 
 # ─── Phase labels ─────────────────────────────────────────────
@@ -50,9 +55,9 @@ PHASE_VERIFY = "VERIFY"
 PHASE_REVIEW = "REVIEW"
 PHASE_FIX = "FIX"
 
-PHASE_ICONS = {
+PHASE_ICONS: dict[str, str] = {
     PHASE_PLAN: "📋",
-    PHASE_CODE: "⚡",
+    PHASE_CODE: "💻",
     PHASE_VERIFY: "🔨",
     PHASE_REVIEW: "🔍",
     PHASE_FIX: "🔧",
@@ -61,18 +66,19 @@ PHASE_ICONS = {
 
 # ─── Data models ──────────────────────────────────────────────
 
+
 @dataclass
 class DuoRound:
     """A single round in the collaborative build."""
     round_number: int
     phase: str
     agent_name: str
-    prompt: str  # truncated for display
+    prompt: str
     output: str
     success: bool
     duration_ms: int = 0
     cost_usd: float | None = None
-    errors: str = ""  # verification errors (stack traces, build failures)
+    errors: str = ""
 
 
 @dataclass
@@ -85,6 +91,7 @@ class DuoResult:
 
 
 # ─── Pipeline ─────────────────────────────────────────────────
+
 
 class DuoBuildPipeline:
     """Collaborative build: two agents iterate toward a finished product.
@@ -116,9 +123,21 @@ class DuoBuildPipeline:
         self._running_cost: float = 0.0
         self._running_time: int = 0
 
+        # Feature integrations
+        self._plugin_registry = None
+        self._persistent_memory = None
+
     async def run(self, objective: str) -> DuoResult:
         """Execute the full collaborative build loop."""
         result = DuoResult()
+
+        # ── Initialize feature integrations ────────────────────
+        self._init_plugins()
+        self._init_persistent_memory()
+
+        # ── Plugin: on_start ───────────────────────────────────
+        if self._plugin_registry:
+            self._plugin_registry.dispatch("on_start", objective=objective)
 
         # ── Agent validation ──────────────────────────────────
         self._validate_agents()
@@ -139,15 +158,26 @@ class DuoBuildPipeline:
                 )
                 if last_phase in ("CODE", "VERIFY", "FIX"):
                     skip_to_review = True
-        
+
         # ── Phase 0: SCAFFOLD ─────────────────────────────────
         if not skip_to_review:
             self._scaffold_if_needed(objective)
 
         # ── Phase 1: PLAN ─────────────────────────────────────
         if not skip_to_review:
+            # Inject persistent memory into planning prompt
+            memory_prefix = ""
+            if self._persistent_memory:
+                memory_section = self._persistent_memory.to_prompt_section(objective)
+                if memory_section:
+                    memory_prefix = memory_section + "\n\n"
+
             self._print_phase(PHASE_PLAN, self.planner, "Creating project plan...")
-            plan = await self._plan(objective)
+
+            if self._plugin_registry:
+                self._plugin_registry.dispatch("on_phase_start", phase=PHASE_PLAN)
+
+            plan = await run_plan(self, objective)
             self._track_round(result, plan)
 
             if not plan.success:
@@ -173,7 +203,11 @@ class DuoBuildPipeline:
         # ── Phase 2: CODE ─────────────────────────────────────
         if not skip_to_review:
             self._print_phase(PHASE_CODE, self.coder, "Implementing from plan...")
-            code_round = await self._code(objective, plan_output)
+
+            if self._plugin_registry:
+                self._plugin_registry.dispatch("on_phase_start", phase=PHASE_CODE)
+
+            code_round = await run_code(self, objective, plan_output)
             self._track_round(result, code_round)
 
             if not code_round.success:
@@ -185,7 +219,11 @@ class DuoBuildPipeline:
 
         # ── Phase 2.5: Install deps + VERIFY ──────────────────
         self._install_deps()
-        verify_result = await self._verify(objective)
+
+        if self._plugin_registry:
+            self._plugin_registry.dispatch("on_phase_start", phase=PHASE_VERIFY)
+
+        verify_result = await run_verify(self, objective)
         self._track_round(result, verify_result)
         self._print_output(verify_result)
 
@@ -204,8 +242,12 @@ class DuoBuildPipeline:
                 PHASE_REVIEW, self.planner,
                 f"Review round {iteration}/{self.max_rounds}..."
             )
-            review = await self._review(
-                objective, iteration,
+
+            if self._plugin_registry:
+                self._plugin_registry.dispatch("on_phase_start", phase=PHASE_REVIEW)
+
+            review = await run_review(
+                self, objective, iteration,
                 verify_errors=verify_result.errors,
                 validation_text=validation_text,
             )
@@ -231,7 +273,6 @@ class DuoBuildPipeline:
                     console.print("[yellow]Build aborted by user.[/]")
                     break
                 elif action and action != "continue":
-                    # Append user notes to review
                     review.output += f"\n\nADDITIONAL USER FEEDBACK: {action}"
 
             # Fix — gets real errors, not just review comments
@@ -239,8 +280,12 @@ class DuoBuildPipeline:
                 PHASE_FIX, self.coder,
                 f"Fixing issues from review {iteration}..."
             )
-            fix_round = await self._fix(
-                objective, review.output, iteration,
+
+            if self._plugin_registry:
+                self._plugin_registry.dispatch("on_phase_start", phase=PHASE_FIX)
+
+            fix_round = await run_fix(
+                self, objective, review.output, iteration,
                 verify_errors=verify_result.errors,
             )
             self._track_round(result, fix_round)
@@ -248,7 +293,7 @@ class DuoBuildPipeline:
 
             # Re-install deps + re-verify after fix
             self._install_deps()
-            verify_result = await self._verify(objective)
+            verify_result = await run_verify(self, objective)
             self._track_round(result, verify_result)
             self._print_output(verify_result)
             self._save_pipeline_state(objective, "VERIFY", plan_output)
@@ -267,8 +312,99 @@ class DuoBuildPipeline:
         # Clear state file on successful completion
         clear_state(self.working_dir)
 
+        # ── Plugin: on_end ────────────────────────────────────
+        if self._plugin_registry:
+            self._plugin_registry.dispatch("on_end", result=result)
+
+        # ── Save to dashboard history ─────────────────────────
+        self._save_run_record(objective, result)
+
+        # ── Persistent memory: learn from this run ────────────
+        self._learn_from_run(objective, result)
+
         self._print_summary(result)
         return result
+
+    # ─── Feature integration helpers ──────────────────────────
+
+    def _init_plugins(self) -> None:
+        """Initialize plugin registry if plugins are available."""
+        try:
+            from forge.build.plugins import PluginRegistry
+            self._plugin_registry = PluginRegistry()
+            self._plugin_registry.load_from_directory(
+                str(Path(self.working_dir) / ".forge" / "plugins")
+            )
+            if self._plugin_registry.plugins:
+                names = [p.name for p in self._plugin_registry.plugins]
+                console.print(f"[dim]  🔌 Plugins loaded: {', '.join(names)}[/]")
+        except ImportError:
+            logger.debug("Plugin system not available")
+
+    def _init_persistent_memory(self) -> None:
+        """Load persistent memory from previous runs."""
+        try:
+            from forge.build.memory import PersistentMemory
+            self._persistent_memory = PersistentMemory(self.working_dir)
+            if self._persistent_memory.count > 0:
+                console.print(
+                    f"[dim]  🧠 Loaded {self._persistent_memory.count} "
+                    f"learnings from previous runs[/]"
+                )
+        except (ImportError, FileNotFoundError):
+            logger.debug("Persistent memory not available")
+
+    def _save_run_record(self, objective: str, result: DuoResult) -> None:
+        """Save run to dashboard history."""
+        try:
+            from forge.build.dashboard import RunRecord, save_run
+
+            total_time = sum(r.duration_ms for r in result.rounds) / 1000
+            total_cost = sum(r.cost_usd or 0 for r in result.rounds)
+            score = score_project(self.working_dir)
+
+            record = RunRecord(
+                objective=objective[:80],
+                planner=self.planner,
+                coder=self.coder,
+                quality_score=score.total,
+                grade=score.grade,
+                duration_sec=total_time,
+                cost_usd=total_cost,
+                rounds=result.total_rounds,
+                approved=result.approved,
+            )
+            save_run(self.working_dir, record)
+        except ImportError:
+            logger.debug("Dashboard not available")
+
+    def _learn_from_run(self, objective: str, result: DuoResult) -> None:
+        """Extract learnings from this run for future runs."""
+        if not self._persistent_memory:
+            return
+
+        if result.approved:
+            self._persistent_memory.add_learning(
+                f"Successfully built: {objective[:60]}",
+                kind="success",
+                objective=objective,
+                agent=self.coder,
+            )
+
+        # Learn from errors
+        for r in result.rounds:
+            if r.phase == PHASE_VERIFY and r.errors:
+                # Extract first error line as a learning
+                first_error = r.errors.split("\n")[0][:100]
+                self._persistent_memory.add_learning(
+                    f"Build error encountered: {first_error}",
+                    kind="failure",
+                    objective=objective,
+                    agent="system",
+                )
+                break  # Only record first error per run
+
+    # ─── State management ─────────────────────────────────────
 
     def _save_pipeline_state(self, objective: str, phase: str, plan_output: str) -> None:
         """Save current pipeline state for resume capability."""
@@ -337,7 +473,6 @@ class DuoBuildPipeline:
         if response.lower() in ("n", "no", "abort", "quit", "q"):
             return "abort"
 
-        # User typed feedback
         if allow_feedback:
             return response
 
@@ -355,14 +490,12 @@ class DuoBuildPipeline:
         if coder_adapter is None:
             console.print(f"[bold red]⚠ Coder agent '{self.coder}' not found![/]")
 
-        # Warn about suboptimal combos
         if self.planner == self.coder:
             console.print(
                 f"[yellow]💡 Tip: Using different agents for planner and coder "
                 f"often produces better results (e.g., --planner gemini --coder claude-sonnet)[/]"
             )
 
-        # Check if coder has agentic capability
         if coder_adapter and not hasattr(coder_adapter, "execute_agentic"):
             console.print(
                 f"[yellow]⚠ Coder '{self.coder}' has no agentic mode — "
@@ -379,7 +512,6 @@ class DuoBuildPipeline:
         - Node.js: npm install (if package.json)
         """
         wd = Path(self.working_dir)
-
         installed = False
 
         # Python projects
@@ -396,7 +528,11 @@ class DuoBuildPipeline:
                 else:
                     err = (result.stderr or result.stdout)[:300]
                     console.print(f"[dim]  ⚠ pip install failed: {err}[/]")
-            except Exception as e:
+            except subprocess.TimeoutExpired:
+                console.print("[dim]  ⚠ pip install timed out[/]")
+            except FileNotFoundError:
+                console.print("[dim]  ⚠ pip not found[/]")
+            except OSError as e:
                 console.print(f"[dim]  ⚠ pip install error: {e}[/]")
         elif (wd / "requirements.txt").exists():
             console.print("[dim]  📦 Installing Python deps (pip install -r)...[/]")
@@ -411,7 +547,11 @@ class DuoBuildPipeline:
                 else:
                     err = (result.stderr or result.stdout)[:300]
                     console.print(f"[dim]  ⚠ pip install failed: {err}[/]")
-            except Exception as e:
+            except subprocess.TimeoutExpired:
+                console.print("[dim]  ⚠ pip install timed out[/]")
+            except FileNotFoundError:
+                console.print("[dim]  ⚠ pip not found[/]")
+            except OSError as e:
                 console.print(f"[dim]  ⚠ pip install error: {e}[/]")
 
         # Node.js projects
@@ -428,11 +568,14 @@ class DuoBuildPipeline:
                 else:
                     err = (result.stderr or result.stdout)[:300]
                     console.print(f"[dim]  ⚠ npm install failed: {err}[/]")
-            except Exception as e:
+            except subprocess.TimeoutExpired:
+                console.print("[dim]  ⚠ npm install timed out[/]")
+            except FileNotFoundError:
+                console.print("[dim]  ⚠ npm not found[/]")
+            except OSError as e:
                 console.print(f"[dim]  ⚠ npm install error: {e}[/]")
 
         if not installed:
-            # Check for Go/Rust
             if (wd / "go.mod").exists():
                 try:
                     subprocess.run(
@@ -440,8 +583,8 @@ class DuoBuildPipeline:
                         cwd=self.working_dir, capture_output=True, timeout=60,
                     )
                     console.print("[dim]  ✅ Go deps downloaded[/]")
-                except Exception:
-                    pass
+                except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+                    logger.debug("Go dep download failed")
             elif (wd / "Cargo.toml").exists():
                 try:
                     subprocess.run(
@@ -449,8 +592,8 @@ class DuoBuildPipeline:
                         cwd=self.working_dir, capture_output=True, timeout=60,
                     )
                     console.print("[dim]  ✅ Rust deps fetched[/]")
-                except Exception:
-                    pass
+                except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+                    logger.debug("Cargo fetch failed")
 
     # ─── Scaffolding ──────────────────────────────────────────
 
@@ -467,7 +610,6 @@ class DuoBuildPipeline:
         """Auto-scaffold project based on objective keywords."""
         wd = Path(self.working_dir)
 
-        # Don't scaffold if project already has files
         existing = [f for f in wd.iterdir()
                     if f.name not in {".git", ".gitignore", "__pycache__", ".venv"}]
         if existing:
@@ -483,10 +625,8 @@ class DuoBuildPipeline:
                     + (f" +{len(files)-5} more" if len(files) > 5 else "")
                     + "[/]"
                 )
-
-                # Init git for diff tracking
                 self._git_init()
-            except Exception as e:
+            except (OSError, ValueError) as e:
                 console.print(f"[dim]  ⚠ Scaffold failed: {e}[/]")
 
     def _git_init(self) -> None:
@@ -506,574 +646,8 @@ class DuoBuildPipeline:
                     ["git", "commit", "-q", "-m", "scaffold", "--allow-empty"],
                     cwd=self.working_dir, capture_output=True, timeout=5,
                 )
-            except Exception:
-                pass
-
-    # ─── Phase: PLAN ──────────────────────────────────────────
-
-    async def _plan(self, objective: str) -> DuoRound:
-        """Planner creates the project architecture and README."""
-        # Show existing scaffold files if any
-        existing = self._list_project_files()
-        scaffold_note = ""
-        if existing:
-            scaffold_note = (
-                f"\n\nNOTE: The project already has a scaffold with these files: "
-                f"{', '.join(existing[:10])}\n"
-                f"Build on this foundation. Don't recreate files that already exist — extend them."
-            )
-
-        prompt = (
-            f"You are a senior software architect designing a production-ready project.\n\n"
-            f"OBJECTIVE: {objective}\n\n"
-            f"Create a detailed project plan with these sections:\n\n"
-            f"## 1. README.md Content\n"
-            f"Write the FULL README.md including:\n"
-            f"- Project name and one-line description\n"
-            f"- Features list (bullet points)\n"
-            f"- Installation instructions (exact commands)\n"
-            f"- Usage examples with code blocks\n"
-            f"- Configuration options (if any)\n\n"
-            f"## 2. File Structure\n"
-            f"List EVERY file to create with:\n"
-            f"- Full relative path\n"
-            f"- One-line purpose description\n"
-            f"- Key classes/functions it should contain\n\n"
-            f"## 3. Tech Stack\n"
-            f"- Language and version requirements\n"
-            f"- Dependencies with version constraints (e.g. click>=8.0)\n"
-            f"- Dev dependencies (pytest, ruff, etc.)\n\n"
-            f"## 4. Architecture\n"
-            f"- Data flow between modules\n"
-            f"- Key design patterns (e.g. factory, strategy, plugin)\n"
-            f"- Error handling strategy\n"
-            f"- Testing strategy (what to test, how)\n\n"
-            f"Be precise with file paths and function signatures. "
-            f"Another AI agent will implement this — ambiguity causes poor code."
-            f"{scaffold_note}"
-        )
-        return await self._dispatch(PHASE_PLAN, self.planner, prompt)
-
-    # ─── Phase: CODE ──────────────────────────────────────────
-
-    async def _code(self, objective: str, plan: str) -> DuoRound:
-        """Coder implements the full project from the plan."""
-        # Pass the FULL plan — it's the blueprint, don't summarize it
-        if len(plan) > 8000:
-            plan_text = plan[:7500] + "\n\n... (plan truncated for length)"
-        else:
-            plan_text = plan
-
-        prompt = (
-            f"You are a senior software engineer. Implement this project completely.\n\n"
-            f"OBJECTIVE: {objective}\n\n"
-            f"PROJECT PLAN:\n{plan_text}\n\n"
-            f"Working directory: {self.working_dir}\n\n"
-            f"QUALITY STANDARDS:\n"
-            f"- Create ALL files from the plan — missing files = failed build\n"
-            f"- Write COMPLETE code — no TODOs, no placeholders, no 'implement later'\n"
-            f"- Include proper type hints, docstrings, and error handling\n"
-            f"- Add __init__.py files for all packages\n"
-            f"- Create pyproject.toml (or package.json) with all dependencies\n"
-            f"- Write at least one test file with real test cases\n"
-            f"- Create a proper .gitignore\n"
-            f"- The README.md should match what the plan specified\n\n"
-            f"Write production-ready code that works out of the box after install."
-        )
-        return await self._dispatch_agentic(PHASE_CODE, self.coder, prompt)
-
-    # ─── Phase: VERIFY ────────────────────────────────────────
-
-    async def _verify(self, objective: str) -> DuoRound:
-        """Run build + lint + tests and capture real errors."""
-        self._print_phase(PHASE_VERIFY, "system", "Running build, lint & tests...")
-
-        suite = detect_verification_suite(self.working_dir)
-        errors: list[str] = []
-        output_parts: list[str] = []
-
-        if not suite.has_commands:
-            output_parts.append("No verification commands detected for this project type.")
-        else:
-            # Run each category with clear labels
-            categories = [
-                ("🔨 BUILD", suite.build_commands),
-                ("🔍 LINT", suite.lint_commands),
-                ("🧪 TESTS", suite.test_commands),
-            ]
-
-            # Syntax check first
-            if suite.syntax_check:
-                try:
-                    result = subprocess.run(
-                        suite.syntax_check, shell=True, capture_output=True,
-                        text=True, cwd=self.working_dir, timeout=30,
-                    )
-                    if result.returncode != 0:
-                        combined = (result.stdout + "\n" + result.stderr).strip()
-                        errors.append(f"SYNTAX CHECK:\n{combined}")
-                        output_parts.append(f"❌ SYNTAX: {combined[:300]}")
-                    else:
-                        output_parts.append("✅ SYNTAX: OK")
-                except Exception as e:
-                    output_parts.append(f"⚠ SYNTAX: {e}")
-
-            for category_name, commands in categories:
-                if not commands:
-                    continue
-
-                for cmd in commands:
-                    try:
-                        result = subprocess.run(
-                            cmd, shell=True, capture_output=True, text=True,
-                            cwd=self.working_dir, timeout=60,
-                        )
-                        stdout = result.stdout.strip()
-                        stderr = result.stderr.strip()
-                        combined = (stdout + "\n" + stderr).strip()
-
-                        if result.returncode != 0:
-                            errors.append(
-                                f"{category_name}:\n$ {cmd}\n"
-                                f"Exit code: {result.returncode}\n{combined}"
-                            )
-                            output_parts.append(
-                                f"❌ {category_name}: {cmd}\n{combined[:500]}"
-                            )
-                        else:
-                            output_parts.append(f"✅ {category_name}: {cmd}")
-                            if combined:
-                                output_parts.append(f"   {combined[:200]}")
-                    except subprocess.TimeoutExpired:
-                        errors.append(f"{category_name}:\n$ {cmd}\nTIMEOUT after 60s")
-                        output_parts.append(f"⏰ {category_name}: {cmd} → TIMEOUT")
-                    except Exception as e:
-                        errors.append(f"{category_name}:\n$ {cmd}\nERROR: {e}")
-                        output_parts.append(f"❌ {category_name}: {cmd} → {e}")
-
-        # Also run validation gate
-        validation = validate_project(self.working_dir)
-        if not validation.passed:
-            output_parts.append(f"\n{validation.to_prompt()}")
-            for issue in validation.issues:
-                if issue.severity.value == "CRITICAL":
-                    errors.append(f"VALIDATION: {issue.message}" +
-                                  (f" ({issue.file})" if issue.file else ""))
-
-        error_text = "\n\n".join(errors) if errors else ""
-        success = len(errors) == 0
-
-        if success:
-            output_parts.insert(0, "🟢 All checks passed")
-        else:
-            output_parts.insert(0, f"🔴 {len(errors)} check(s) failed")
-
-        return DuoRound(
-            round_number=len(self.rounds) + 1,
-            phase=PHASE_VERIFY,
-            agent_name="system",
-            prompt="verify build, lint & tests",
-            output="\n".join(output_parts),
-            success=success,
-            errors=error_text,
-        )
-
-    # ─── Phase: REVIEW ────────────────────────────────────────
-
-    async def _review(
-        self, objective: str, iteration: int,
-        verify_errors: str = "", validation_text: str = "",
-    ) -> DuoRound:
-        """Reviewer examines the code and produces feedback."""
-        ctx = gather_compact(self.working_dir)
-
-        # Build compact history of previous rounds
-        history = build_history_summary(
-            [{"agent_name": r.agent_name, "phase": r.phase, "output": r.output}
-             for r in self.rounds],
-            max_total=800,
-        )
-
-        # Read key files for the reviewer to actually inspect
-        file_samples = self._read_key_files_for_review()
-
-        # Git diff for rounds 2+
-        diff_text = ""
-        if iteration > 1:
-            diff_text = self._get_round_diff()
-
-        prompt = (
-            f"You are a senior code reviewer performing a thorough quality audit.\n\n"
-            f"OBJECTIVE: {objective}\n"
-            f"Review round: {iteration}/{self.max_rounds}\n\n"
-            f"PROJECT FILES: {ctx.to_prompt()}\n\n"
-        )
-
-        if file_samples:
-            prompt += f"KEY FILE CONTENTS:\n{file_samples}\n\n"
-
-        # Show verification errors (real stack traces!)
-        if verify_errors:
-            prompt += (
-                f"🔴 BUILD/TEST ERRORS (these are REAL errors from running the code):\n"
-                f"{verify_errors[:2000]}\n\n"
-            )
-
-        if validation_text:
-            prompt += f"{validation_text}\n\n"
-
-        if diff_text and iteration > 1:
-            prompt += f"CHANGES SINCE LAST ROUND:\n{diff_text}\n\n"
-
-        if history:
-            prompt += f"PREVIOUS ROUNDS:\n{history}\n\n"
-
-        prompt += (
-            f"REVIEW CRITERIA (check each):\n"
-            f"1. COMPLETENESS — Does the code fully implement the objective?\n"
-            f"2. CORRECTNESS — Are there bugs, logic errors, or crashes?\n"
-            f"3. STRUCTURE — Is the code well-organized with proper separation?\n"
-            f"4. QUALITY — Type hints, docstrings, error handling present?\n"
-            f"5. TESTS — Do test files exist with meaningful test cases?\n"
-            f"6. PACKAGING — Is there pyproject.toml/package.json with deps?\n"
-            f"7. DOCS — Does README have install + usage instructions?\n\n"
-            f"RESPONSE FORMAT:\n"
-            f"If the project is COMPLETE and PRODUCTION-READY, respond:\n"
-            f"APPROVED\n"
-            f"[brief summary of what's good]\n\n"
-            f"If NOT ready, respond with:\n"
-            f"ISSUES:\n"
-            f"- [CRITICAL] file.py: description of critical bug\n"
-            f"- [MISSING] description of missing feature\n"
-            f"- [QUALITY] file.py: quality improvement needed\n\n"
-            f"List max 7 issues, prioritized by severity. Be specific with file names."
-        )
-        return await self._dispatch(PHASE_REVIEW, self.planner, prompt)
-
-    # ─── Phase: FIX ───────────────────────────────────────────
-
-    async def _fix(
-        self, objective: str, review_feedback: str, iteration: int,
-        verify_errors: str = "",
-    ) -> DuoRound:
-        """Coder fixes issues identified in the review."""
-        ctx = gather_compact(self.working_dir)
-
-        # Pass FULL review feedback
-        if len(review_feedback) > 3000:
-            feedback_text = review_feedback[:2500] + "\n\n... (truncated)"
-        else:
-            feedback_text = review_feedback
-
-        prompt = (
-            f"You are a senior software engineer fixing issues from a code review.\n\n"
-            f"OBJECTIVE: {objective}\n\n"
-            f"REVIEW FEEDBACK — fix ALL of these:\n{feedback_text}\n\n"
-        )
-
-        # Include real errors from verification (stack traces!)
-        if verify_errors:
-            prompt += (
-                f"🔴 ACTUAL BUILD/TEST ERRORS (fix these first!):\n"
-                f"{verify_errors[:2000]}\n\n"
-            )
-
-        prompt += (
-            f"CURRENT PROJECT: {ctx.to_prompt()}\n"
-            f"Working directory: {self.working_dir}\n\n"
-            f"INSTRUCTIONS:\n"
-            f"- Fix every issue listed in the review\n"
-            f"- Fix ALL build/test errors shown above\n"
-            f"- Create any missing files mentioned\n"
-            f"- Do NOT rewrite files that are already working correctly\n"
-            f"- Only modify files that have issues\n"
-            f"- After fixing, verify the project still runs/imports correctly\n\n"
-            f"Fix iteration: {iteration}/{self.max_rounds}"
-        )
-        return await self._dispatch_agentic(PHASE_FIX, self.coder, prompt)
-
-    # ─── File reading helpers ─────────────────────────────────
-
-    def _read_key_files_for_review(self, max_total_chars: int = 4000) -> str:
-        """Read key project files for the reviewer to inspect."""
-        wd = Path(self.working_dir)
-        priority_patterns = [
-            "README.md", "pyproject.toml", "package.json", "setup.py",
-            "requirements.txt",
-        ]
-        source_exts = {".py", ".js", ".ts", ".go", ".rs", ".java"}
-
-        files_to_read: list[Path] = []
-
-        # Priority files first
-        for pattern in priority_patterns:
-            f = wd / pattern
-            if f.exists():
-                files_to_read.append(f)
-
-        # Source files (skip tests, sort by size)
-        skip = {".git", "__pycache__", "node_modules", ".venv", "venv"}
-        source_files = []
-        for p in wd.rglob("*"):
-            if p.is_file() and p.suffix in source_exts:
-                rel = p.relative_to(wd)
-                if not any(part in skip or part.startswith(".") for part in rel.parts):
-                    source_files.append(p)
-        source_files.sort(key=lambda p: p.stat().st_size)
-        files_to_read.extend(source_files[:10])
-
-        # Read files with truncation
-        parts = []
-        total = 0
-        for f in files_to_read:
-            if total >= max_total_chars:
-                break
-            try:
-                content = f.read_text(errors="replace")
-                rel = str(f.relative_to(wd))
-                budget = min(len(content), max_total_chars - total, 1500)
-                snippet = content[:budget]
-                if len(content) > budget:
-                    snippet += f"\n... ({len(content) - budget} more chars)"
-                parts.append(f"--- {rel} ---\n{snippet}")
-                total += len(snippet)
-            except Exception:
-                continue
-
-        return "\n\n".join(parts)
-
-    def _get_round_diff(self, max_chars: int = 2000) -> str:
-        """Get git diff since last commit (shows what changed this round)."""
-        try:
-            result = subprocess.run(
-                ["git", "diff", "--stat"],
-                cwd=self.working_dir, capture_output=True, text=True, timeout=5,
-            )
-            stat = result.stdout.strip()
-
-            result2 = subprocess.run(
-                ["git", "diff"],
-                cwd=self.working_dir, capture_output=True, text=True, timeout=5,
-            )
-            diff = result2.stdout.strip()
-
-            if not diff:
-                return ""
-
-            combined = f"{stat}\n\n{diff}"
-            if len(combined) > max_chars:
-                combined = combined[:max_chars] + "\n... (diff truncated)"
-            return combined
-        except Exception:
-            return ""
-
-    async def _execute_with_spinner(
-        self, execute_fn, ctx, phase: str, agent: str, max_retries: int = 1,
-    ):
-        """Execute an agent function with a live progress spinner and auto-retry."""
-        icon = PHASE_ICONS.get(phase, "")
-
-        for attempt in range(max_retries + 1):
-            start = time.monotonic()
-
-            try:
-                # Run the actual agent call in background
-                task = asyncio.create_task(execute_fn(ctx))
-
-                # Update spinner while waiting
-                retry_label = f" (retry {attempt})" if attempt > 0 else ""
-                with console.status(
-                    f"[bold]{icon} {agent.upper()}[/] working{retry_label}...",
-                    spinner="dots",
-                ) as status:
-                    while not task.done():
-                        elapsed = time.monotonic() - start
-                        status.update(
-                            f"[bold]{icon} {agent.upper()}[/] working{retry_label}... "
-                            f"[dim]({elapsed:.0f}s)[/]"
-                        )
-                        await asyncio.sleep(1.0)
-
-                result = task.result()
-
-                # Check if result indicates failure worth retrying
-                if not result.is_success and attempt < max_retries:
-                    console.print(
-                        f"[yellow]  ⚠ {agent.upper()} failed — retrying in 3s...[/]"
-                    )
-                    await asyncio.sleep(3.0)
-                    continue
-
-                return result
-
-            except (asyncio.TimeoutError, TimeoutError, OSError) as e:
-                if attempt < max_retries:
-                    console.print(
-                        f"[yellow]  ⚠ {agent.upper()} error: {e} — retrying in 3s...[/]"
-                    )
-                    await asyncio.sleep(3.0)
-                    continue
-                raise
-            except Exception:
-                raise
-
-        # Should not reach here, but just in case
-        return task.result()
-
-    # ─── Dispatch helpers ─────────────────────────────────────
-
-    async def _dispatch(self, phase: str, agent: str, prompt: str) -> DuoRound:
-        """Dispatch to an agent in read-only mode."""
-        ctx = TaskContext(
-            working_dir=self.working_dir,
-            prompt=prompt,
-            timeout=self.timeout,
-        )
-
-        adapter = self.engine.adapters.get(agent)
-        if adapter is None:
-            return DuoRound(
-                round_number=len(self.rounds) + 1,
-                phase=phase,
-                agent_name=agent,
-                prompt=prompt[:200],
-                output=f"Agent '{agent}' not found",
-                success=False,
-            )
-
-        result = await self._execute_with_spinner(adapter.execute, ctx, phase, agent)
-
-        return DuoRound(
-            round_number=len(self.rounds) + 1,
-            phase=phase,
-            agent_name=agent,
-            prompt=prompt[:200],
-            output=result.output,
-            success=result.is_success,
-            duration_ms=result.duration_ms,
-            cost_usd=result.cost_usd,
-        )
-
-    async def _dispatch_agentic(self, phase: str, agent: str, prompt: str) -> DuoRound:
-        """Dispatch to an agent in agentic mode (can write files).
-
-        If the agent can't natively write files (like Gemini CLI),
-        we parse its text output for file blocks and write them ourselves.
-        """
-        ctx = TaskContext(
-            working_dir=self.working_dir,
-            prompt=prompt,
-            timeout=self.timeout,
-        )
-
-        adapter = self.engine.adapters.get(agent)
-        if adapter is None:
-            return DuoRound(
-                round_number=len(self.rounds) + 1,
-                phase=phase,
-                agent_name=agent,
-                prompt=prompt[:200],
-                output=f"Agent '{agent}' not found",
-                success=False,
-            )
-
-        # Count files before execution
-        files_before = set(self._list_project_files())
-
-        if hasattr(adapter, "execute_agentic"):
-            result = await self._execute_with_spinner(
-                adapter.execute_agentic, ctx, phase, agent
-            )
-        else:
-            result = await self._execute_with_spinner(
-                adapter.execute, ctx, phase, agent
-            )
-
-        # Check if any files were actually created
-        files_after = set(self._list_project_files())
-        new_files = files_after - files_before
-
-        # Fallback: if no files were created on disk, parse output for file blocks
-        if result.is_success and not new_files and result.output:
-            extracted = self._extract_files_from_output(result.output)
-            if extracted:
-                console.print(
-                    f"[dim]  📝 Extracted {len(extracted)} file(s) from output[/]"
-                )
-                result.output = (
-                    f"Extracted {len(extracted)} file(s): "
-                    + ", ".join(extracted)
-                    + "\n\n" + result.output
-                )
-
-        # Commit round for diff tracking
-        self._commit_round(phase)
-
-        return DuoRound(
-            round_number=len(self.rounds) + 1,
-            phase=phase,
-            agent_name=agent,
-            prompt=prompt[:200],
-            output=result.output,
-            success=result.is_success,
-            duration_ms=result.duration_ms,
-            cost_usd=result.cost_usd,
-        )
-
-    def _extract_files_from_output(self, output: str) -> list[str]:
-        """Parse file blocks from agent text output and write to disk.
-
-        Fallback for agents that can't write files natively (e.g. Gemini CLI).
-        Supports multiple output formats.
-        """
-        import re
-
-        # Strip noise
-        clean_lines = []
-        for line in output.split("\n"):
-            if any(skip in line for skip in [
-                "Error executing tool",
-                "Tool execution denied",
-                "Hook registry initialized",
-                "Loaded cached credentials",
-                "Did you mean one of:",
-            ]):
-                continue
-            clean_lines.append(line)
-        clean = "\n".join(clean_lines)
-
-        written = []
-
-        # Pattern 1: === FILE: path === ... === END FILE ===
-        p1 = r"=== FILE:\s*(.+?)\s*===\n(.*?)(?=\n=== END FILE ===|\n=== FILE:|\Z)"
-        matches = re.findall(p1, clean, re.DOTALL)
-
-        # Pattern 2: ```path\n...\n```
-        if not matches:
-            p2 = r"```(\S+/\S+\.\w+)\n(.*?)```"
-            matches = re.findall(p2, clean, re.DOTALL)
-
-        # Pattern 3: --- path ---
-        if not matches:
-            p3 = r"---\s*(\S+/\S+\.\w+)\s*---\n(.*?)(?=\n---\s|\Z)"
-            matches = re.findall(p3, clean, re.DOTALL)
-
-        for filepath, content in matches:
-            filepath = filepath.strip()
-            content = content.rstrip("\n") + "\n"
-
-            # Security
-            if ".." in filepath or filepath.startswith("/"):
-                continue
-            if "/" not in filepath and "." not in filepath:
-                continue
-
-            full_path = Path(self.working_dir) / filepath
-            full_path.parent.mkdir(parents=True, exist_ok=True)
-            full_path.write_text(content)
-            written.append(filepath)
-
-        return written
+            except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
+                logger.debug("Git init failed: %s", e)
 
     # ─── Git helpers ──────────────────────────────────────────
 
@@ -1088,8 +662,8 @@ class DuoBuildPipeline:
                 ["git", "commit", "-q", "-m", f"duo-{phase.lower()}", "--allow-empty"],
                 cwd=self.working_dir, capture_output=True, timeout=5,
             )
-        except Exception:
-            pass
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
+            logger.debug("Commit round failed: %s", e)
 
     # ─── Approval detection ──────────────────────────────────
 
@@ -1125,7 +699,8 @@ class DuoBuildPipeline:
                     ["git", "init", "-q"],
                     cwd=self.working_dir, capture_output=True, timeout=10,
                 )
-            except Exception:
+            except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
+                logger.warning("Git init failed during auto-commit: %s", e)
                 return
 
         try:
@@ -1134,7 +709,6 @@ class DuoBuildPipeline:
                 cwd=self.working_dir, capture_output=True, timeout=10,
             )
 
-            # Create a meaningful commit message
             short_obj = objective[:60].replace('"', '\\"')
             message = f"feat: {short_obj}\n\nBuilt by Forge duo pipeline (v1.0)"
 
@@ -1143,8 +717,80 @@ class DuoBuildPipeline:
                 cwd=self.working_dir, capture_output=True, timeout=10,
             )
             console.print("[green]📦 Auto-committed project[/]")
-        except Exception as e:
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
             console.print(f"[dim]⚠ Auto-commit failed: {e}[/]")
+
+    # ─── File reading for review ──────────────────────────────
+
+    def _read_key_files_for_review(self, max_total_chars: int = 4000) -> str:
+        """Read key project files for the reviewer to inspect."""
+        wd = Path(self.working_dir)
+        priority_patterns = [
+            "README.md", "pyproject.toml", "package.json", "setup.py",
+            "requirements.txt",
+        ]
+        source_exts = {".py", ".js", ".ts", ".go", ".rs", ".java"}
+
+        files_to_read: list[Path] = []
+
+        for pattern in priority_patterns:
+            f = wd / pattern
+            if f.exists():
+                files_to_read.append(f)
+
+        skip = {".git", "__pycache__", "node_modules", ".venv", "venv"}
+        source_files = []
+        for p in wd.rglob("*"):
+            if p.is_file() and p.suffix in source_exts:
+                rel = p.relative_to(wd)
+                if not any(part in skip or part.startswith(".") for part in rel.parts):
+                    source_files.append(p)
+        source_files.sort(key=lambda p: p.stat().st_size)
+        files_to_read.extend(source_files[:10])
+
+        parts = []
+        total = 0
+        for f in files_to_read:
+            if total >= max_total_chars:
+                break
+            try:
+                content = f.read_text(errors="replace")
+                rel = str(f.relative_to(wd))
+                budget = min(len(content), max_total_chars - total, 1500)
+                snippet = content[:budget]
+                if len(content) > budget:
+                    snippet += f"\n... ({len(content) - budget} more chars)"
+                parts.append(f"--- {rel} ---\n{snippet}")
+                total += len(snippet)
+            except OSError:
+                continue
+
+        return "\n\n".join(parts)
+
+    def _get_round_diff(self, max_chars: int = 2000) -> str:
+        """Get git diff since last commit (shows what changed this round)."""
+        try:
+            result = subprocess.run(
+                ["git", "diff", "--stat"],
+                cwd=self.working_dir, capture_output=True, text=True, timeout=5,
+            )
+            stat = result.stdout.strip()
+
+            result2 = subprocess.run(
+                ["git", "diff"],
+                cwd=self.working_dir, capture_output=True, text=True, timeout=5,
+            )
+            diff = result2.stdout.strip()
+
+            if not diff:
+                return ""
+
+            combined = f"{stat}\n\n{diff}"
+            if len(combined) > max_chars:
+                combined = combined[:max_chars] + "\n... (diff truncated)"
+            return combined
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+            return ""
 
     # ─── TUI ──────────────────────────────────────────────────
 
@@ -1173,7 +819,6 @@ class DuoBuildPipeline:
         if not round_.output:
             return
 
-        # Truncate for display
         output = round_.output
         max_display = 3000
         truncated = len(output) > max_display
@@ -1192,7 +837,6 @@ class DuoBuildPipeline:
             f"  {dur}{cost}"
         )
 
-        # Choose border style based on phase
         border_style = {
             PHASE_PLAN: "blue",
             PHASE_CODE: "green",
@@ -1266,13 +910,11 @@ class DuoBuildPipeline:
 
         console.print(table)
 
-        # Status
         if result.approved:
             console.print(f"\n[bold green]✅ Project approved and committed as v1.0[/]")
         else:
             console.print(f"\n[bold yellow]⚠  Max review rounds reached — project may need manual review[/]")
 
-        # Files
         if result.files_created:
             console.print(f"\n[dim]📂 {len(result.files_created)} file(s) created:[/]")
             for f in result.files_created[:20]:

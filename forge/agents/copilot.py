@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import shutil
 from typing import AsyncIterator
 
 from forge.agents.base import AgentResult, AgentStatus, BaseAdapter, TaskContext
 
+logger = logging.getLogger(__name__)
+
 
 class CopilotAdapter(BaseAdapter):
-    """Adapter for GitHub Copilot CLI (gh copilot).
+    """Copilot adapter — uses github copilot CLI via `gh copilot`.
 
     Uses `gh copilot suggest` for code/command generation
     and `gh copilot explain` for explanations.
@@ -91,7 +94,8 @@ class CopilotAdapter(BaseAdapter):
                 duration_ms=self._now_ms() - start,
                 error=f"Copilot timed out after {ctx.timeout}s",
             )
-        except Exception as e:
+        except (FileNotFoundError, OSError, ValueError) as e:
+            logger.warning("Copilot execution error: %s", e)
             return self._make_error_result(str(e), self._now_ms() - start)
 
         elapsed = self._now_ms() - start

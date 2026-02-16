@@ -13,6 +13,7 @@ Integrates all autonomy features:
 from __future__ import annotations
 
 import asyncio
+import logging
 import subprocess
 from pathlib import Path
 from dataclasses import dataclass, field
@@ -31,6 +32,7 @@ from forge.build.testing import detect_verification_suite
 from forge.engine import ForgeEngine
 
 console = Console()
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -385,8 +387,8 @@ class BuildPipeline:
             if result.returncode == 0:
                 changed = set(result.stdout.strip().split("\n")) if result.stdout.strip() else set()
                 return sorted(changed & common_files)
-        except Exception:
-            pass
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+            logger.debug("Git diff detection failed")
         return []
 
     def _create_checkpoint(self, label: str) -> str:
@@ -407,7 +409,8 @@ class BuildPipeline:
                 cwd=self.working_dir, capture_output=True, timeout=10,
             )
             return label
-        except Exception:
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
+            logger.debug("Checkpoint creation failed: %s", e)
             return label
 
     def _rollback(self, checkpoint_ref: str) -> None:
@@ -421,8 +424,8 @@ class BuildPipeline:
                 ["git", "clean", "-fd"],
                 cwd=self.working_dir, capture_output=True, timeout=10,
             )
-        except Exception:
-            pass
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
+            logger.debug("Rollback failed: %s", e)
 
     def _auto_install_deps(self) -> None:
         """Auto-detect and install dependencies."""
@@ -443,8 +446,8 @@ class BuildPipeline:
                         ["python3", "-m", "pip", "install", "-r", "requirements.txt", "-q"],
                         cwd=self.working_dir, capture_output=True, text=True, timeout=60,
                     )
-            except Exception:
-                pass
+            except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+                logger.debug("pip install failed")
 
         pkg_file = wd / "package.json"
         if pkg_file.exists() and not (wd / "node_modules").exists():
@@ -454,8 +457,8 @@ class BuildPipeline:
                     ["npm", "install"],
                     cwd=self.working_dir, capture_output=True, text=True, timeout=120,
                 )
-            except Exception:
-                pass
+            except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+                logger.debug("npm install failed")
 
     def _run_verification(self) -> tuple[bool, str]:
         """Run verification commands."""
@@ -478,7 +481,7 @@ class BuildPipeline:
             except subprocess.TimeoutExpired:
                 all_output.append(f"$ {cmd}\n[TIMEOUT after 60s]")
                 all_passed = False
-            except Exception as e:
+            except (FileNotFoundError, OSError) as e:
                 all_output.append(f"$ {cmd}\n[ERROR: {e}]")
                 all_passed = False
 
@@ -496,8 +499,8 @@ class BuildPipeline:
                 cwd=self.working_dir, capture_output=True, timeout=10,
             )
             console.print(f"[dim]  Committed: {message}[/]")
-        except Exception:
-            pass
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+            logger.debug("Git commit failed")
 
     def _print_success(self, iteration: int) -> None:
         total_cost = self.memory.total_cost

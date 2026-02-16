@@ -9,10 +9,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import shutil
 from typing import AsyncIterator
 
 from forge.agents.base import AgentResult, AgentStatus, BaseAdapter, TaskContext
+
+logger = logging.getLogger(__name__)
 
 
 class ClaudeAdapter(BaseAdapter):
@@ -119,7 +122,8 @@ class ClaudeAdapter(BaseAdapter):
                 duration_ms=self._now_ms() - start,
                 error=f"Claude timed out after {ctx.timeout}s",
             )
-        except Exception as e:
+        except (FileNotFoundError, OSError, ValueError) as e:
+            logger.warning("Claude execution error: %s", e)
             return self._make_error_result(str(e), self._now_ms() - start)
 
         elapsed = self._now_ms() - start

@@ -13,6 +13,8 @@
 - [Quick Start](#quick-start)
 - [Orchestration Modes](#orchestration-modes)
 - [Autonomous Build](#autonomous-build)
+- [Duo Pipeline](#duo-pipeline)
+- [Benchmark & A/B Testing](#benchmark--ab-testing)
 - [Configuration](#configuration)
 - [Architecture](#architecture)
 - [Cost Model](#cost-model)
@@ -27,9 +29,16 @@ Forge dispatches coding tasks to multiple AI agents, compares their outputs, and
 
 - **Multi-model dispatch** -- Run the same prompt across Claude Sonnet, Opus, Haiku, Gemini, and Copilot simultaneously.
 - **Inter-agent communication** -- Chain, review, consensus, and swarm orchestration modes where agents build on each other's output.
+- **Duo build pipeline** -- Collaborative planner+coder loop with plan → code → verify → review → fix cycles.
 - **Autonomous build pipeline** -- Agentic code generation with workspace-aware context, iterative verification, error classification, and automatic rollback.
 - **Session memory** -- Agents remember previous attempts and avoid repeating failed approaches.
+- **Persistent memory** -- Cross-run learning: patterns, failures, and strategies are carried between sessions.
 - **Smart testing** -- Auto-detects project type and generates appropriate verification commands.
+- **Benchmark suite** -- 5 standard objectives for reproducible quality comparison.
+- **A/B testing** -- Compare prompt variants and agent combos across benchmark runs.
+- **Dashboard** -- HTML dashboard with Chart.js visualizations, quality trends, and cost tracking.
+- **Plugin system** -- Extensible hook-based architecture for custom pipeline behaviors.
+- **Resume support** -- Resume interrupted builds from the last completed phase.
 - **Structured output** -- Per-agent cost tracking, token counts, duration, and model identification.
 - **Project scaffolding** -- Create new projects with `forge build --new <name>` and built-in templates via `forge init`.
 
@@ -131,6 +140,48 @@ forge build "Refactor to TypeScript" --auto-commit
 # Initialize from a template, then build
 forge init flask-api --dir ./my-app
 forge build --dir ./my-app "Add user registration with email verification"
+```
+
+## Duo Pipeline
+
+The duo pipeline orchestrates collaboration between a **planner** and a **coder** agent:
+
+```bash
+# Default: Gemini plans, Claude codes
+forge duo "Build a todo app with user auth"
+
+# Custom agent assignment
+forge duo "Build a REST API" --planner gemini --coder claude-sonnet
+
+# Interactive mode: pause after each phase for user review
+forge duo "Create a CLI tool" --interactive
+
+# Resume an interrupted build
+forge duo "Build a todo app" --resume
+```
+
+### Pipeline Flow
+
+1. **SCAFFOLD** → Auto-detect project type, create skeleton files
+2. **PLAN** → Planner creates README, architecture, and file list
+3. **CODE** → Coder implements all files from the plan
+4. **VERIFY** → Run build + lint + tests, capture real errors
+5. **REVIEW** → Planner reviews code with verification results
+6. **FIX** → Coder fixes issues (gets real stack traces)
+7. Repeat 4–6 until approved or max rounds reached
+8. **FINAL** → Auto-commit and quality scoring
+
+## Benchmark & A/B Testing
+
+```bash
+# List available benchmarks
+forge benchmark --list
+
+# Run a benchmark suite
+forge benchmark --run standard
+
+# Generate HTML dashboard from run history
+forge dashboard --open
 ```
 
 ### Build Pipeline
@@ -239,18 +290,34 @@ forge/
     gemini.py           Gemini CLI adapter
     copilot.py          GitHub Copilot adapter
   build/
-    pipeline.py         Autonomous build loop with verification
+    duo.py              Duo build pipeline orchestrator (~640 LOC)
+    pipeline.py         Single-agent autonomous build loop
     context.py          Workspace-aware context gathering
-    memory.py           Session memory across iterations
+    compact.py          Smart file chunking and context windowing
+    memory.py           Session + persistent cross-run memory
     testing.py          Smart test generation and detection
     errors.py           Error classification and routing
     templates.py        Project templates for scaffolding
-    workspace.py        File tree and git state management
+    scoring.py          Quality scoring (structure/code/tests/docs)
+    validate.py         Project validation gate
+    depfix.py           Auto-resolve missing dependencies
+    resume.py           Save/restore pipeline state
+    benchmark.py        Standard benchmark objectives and runner
+    ab_test.py          A/B testing for prompts and agent combos
+    dashboard.py        HTML dashboard with Chart.js
+    plugins.py          Plugin registry with hook-based extension
+    phases/
+      __init__.py       Phase module re-exports
+      dispatch.py       Agent dispatch with spinner and retry
+      plan.py           PLAN phase logic
+      code.py           CODE phase logic
+      verify.py         VERIFY phase logic
+      review.py         REVIEW + FIX phase logic
   tui/
     panels.py           Terminal UI components (Rich)
 ```
 
-The engine initializes agent adapters from configuration, supporting multiple model variants per backend. The orchestrator implements communication patterns on top of the engine's dispatch primitives. The build pipeline uses the Claude adapter's agentic mode for file system access, with workspace context, session memory, and error classification driving iteration strategy.
+The engine initializes agent adapters from configuration, supporting multiple model variants per backend. The orchestrator implements communication patterns on top of the engine's dispatch primitives. The duo pipeline delegates each phase to its own module in `build/phases/`, keeping the orchestrator thin and each phase independently testable.
 
 ## Cost Model
 

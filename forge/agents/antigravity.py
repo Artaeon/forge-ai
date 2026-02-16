@@ -12,11 +12,14 @@ Auth: Set GOOGLE_API_KEY or GEMINI_API_KEY environment variable.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import time
 from typing import AsyncIterator
 
 from forge.agents.base import AgentResult, AgentStatus, BaseAdapter, TaskContext
+
+logger = logging.getLogger(__name__)
 
 
 # Pricing per million tokens (approximate, USD)
@@ -131,7 +134,8 @@ class AntigravityAdapter(BaseAdapter):
                 duration_ms=self._now_ms() - start,
                 error=f"Antigravity timed out after {ctx.timeout}s",
             )
-        except Exception as e:
+        except (ConnectionError, RuntimeError, OSError, ValueError) as e:
+            logger.warning("Antigravity execution error: %s", e)
             return self._make_error_result(str(e), self._now_ms() - start)
 
         elapsed = self._now_ms() - start
@@ -139,7 +143,7 @@ class AntigravityAdapter(BaseAdapter):
         # Extract response text
         try:
             output_text = response.text or ""
-        except Exception:
+        except (AttributeError, ValueError):
             output_text = str(response)
 
         # Extract usage metadata
@@ -272,8 +276,9 @@ class AntigravityAdapter(BaseAdapter):
                     text = chunk.text
                     if text:
                         yield text
-                except Exception:
+                except (AttributeError, ValueError, StopIteration):
                     continue
 
-        except Exception as e:
+        except (ConnectionError, RuntimeError, OSError, ValueError) as e:
+            logger.warning("Antigravity streaming error: %s", e)
             yield f"[error] {e}"
