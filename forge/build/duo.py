@@ -36,6 +36,7 @@ from forge.build.validate import validate_project
 from forge.build.templates import detect_template, scaffold_template
 from forge.build.testing import detect_verification_suite
 from forge.build.resume import save_state, load_state, clear_state
+from forge.build.depfix import resolve_missing_deps
 
 console = Console()
 
@@ -187,6 +188,10 @@ class DuoBuildPipeline:
         self._track_round(result, verify_result)
         self._print_output(verify_result)
 
+        # Auto-resolve missing deps if errors
+        if verify_result.errors:
+            self._auto_resolve_deps(verify_result.errors)
+
         # ── Phases 3-5: REVIEW / FIX / VERIFY loop ────────────
         for iteration in range(1, self.max_rounds + 1):
             # Validation gate
@@ -246,6 +251,10 @@ class DuoBuildPipeline:
             self._track_round(result, verify_result)
             self._print_output(verify_result)
             self._save_pipeline_state(objective, "VERIFY", plan_output)
+
+            # Auto-resolve missing deps
+            if verify_result.errors:
+                self._auto_resolve_deps(verify_result.errors)
 
         # ── Finalize ──────────────────────────────────────────
         result.total_rounds = len(result.rounds)
@@ -443,6 +452,15 @@ class DuoBuildPipeline:
                     pass
 
     # ─── Scaffolding ──────────────────────────────────────────
+
+    def _auto_resolve_deps(self, error_text: str) -> None:
+        """Auto-detect and install missing dependencies from error output."""
+        installed = resolve_missing_deps(self.working_dir, error_text)
+        if installed:
+            console.print(
+                f"[dim]  🔧 Auto-installed missing deps: "
+                f"{', '.join(installed)}[/]"
+            )
 
     def _scaffold_if_needed(self, objective: str) -> None:
         """Auto-scaffold project based on objective keywords."""
