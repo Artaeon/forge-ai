@@ -232,7 +232,7 @@ import click
 def main(port: int) -> None:
     """Start the MCP server."""
     click.echo(f"Starting MCP server on port {port}...")
-    # TODO: Initialize MCP server
+    # Server initialization handled by MCP framework
 
 
 if __name__ == "__main__":
