@@ -797,31 +797,58 @@ class DuoBuildPipeline:
         except Exception:
             return ""
 
-    async def _execute_with_spinner(self, execute_fn, ctx, phase: str, agent: str):
-        """Execute an agent function with a live progress spinner."""
+    async def _execute_with_spinner(
+        self, execute_fn, ctx, phase: str, agent: str, max_retries: int = 1,
+    ):
+        """Execute an agent function with a live progress spinner and auto-retry."""
         icon = PHASE_ICONS.get(phase, "")
-        start = time.monotonic()
 
-        async def _run_with_status():
-            # Run the actual agent call in background
-            task = asyncio.create_task(execute_fn(ctx))
+        for attempt in range(max_retries + 1):
+            start = time.monotonic()
 
-            # Update spinner while waiting
-            with console.status(
-                f"[bold]{icon} {agent.upper()}[/] working...",
-                spinner="dots",
-            ) as status:
-                while not task.done():
-                    elapsed = time.monotonic() - start
-                    status.update(
-                        f"[bold]{icon} {agent.upper()}[/] working... "
-                        f"[dim]({elapsed:.0f}s)[/]"
+            try:
+                # Run the actual agent call in background
+                task = asyncio.create_task(execute_fn(ctx))
+
+                # Update spinner while waiting
+                retry_label = f" (retry {attempt})" if attempt > 0 else ""
+                with console.status(
+                    f"[bold]{icon} {agent.upper()}[/] working{retry_label}...",
+                    spinner="dots",
+                ) as status:
+                    while not task.done():
+                        elapsed = time.monotonic() - start
+                        status.update(
+                            f"[bold]{icon} {agent.upper()}[/] working{retry_label}... "
+                            f"[dim]({elapsed:.0f}s)[/]"
+                        )
+                        await asyncio.sleep(1.0)
+
+                result = task.result()
+
+                # Check if result indicates failure worth retrying
+                if not result.is_success and attempt < max_retries:
+                    console.print(
+                        f"[yellow]  ⚠ {agent.upper()} failed — retrying in 3s...[/]"
                     )
-                    await asyncio.sleep(1.0)
+                    await asyncio.sleep(3.0)
+                    continue
 
-            return task.result()
+                return result
 
-        return await _run_with_status()
+            except (asyncio.TimeoutError, TimeoutError, OSError) as e:
+                if attempt < max_retries:
+                    console.print(
+                        f"[yellow]  ⚠ {agent.upper()} error: {e} — retrying in 3s...[/]"
+                    )
+                    await asyncio.sleep(3.0)
+                    continue
+                raise
+            except Exception:
+                raise
+
+        # Should not reach here, but just in case
+        return task.result()
 
     # ─── Dispatch helpers ─────────────────────────────────────
 
